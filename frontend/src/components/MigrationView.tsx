@@ -307,37 +307,119 @@ function OrchestrationView() {
 
 function QAView() {
  const reconciliation = usePipelineStore(s => s.reconciliation)
- if (!reconciliation) return <div className="text-slate-500">QA output not available yet.</div>
+ if (!reconciliation) return (
+ <div className="p-8 flex flex-col items-center gap-3 text-slate-400">
+ <div className="w-8 h-8 border-2 border-slate-300 border-t-emerald-500 rounded-full animate-spin" />
+ <div>QA verification is running after load completes…</div>
+ </div>
+ )
+ const match = reconciliation.match_pct
+ const matchColor = match >= 99 ? 'text-emerald-700' : match >= 90 ? 'text-amber-700' : 'text-red-700'
+ const checks = [
+ { label: 'member_id integrity', ok: reconciliation.checksum_member_id },
+ { label: 'claim_amount integrity', ok: reconciliation.checksum_claim_amount },
+ { label: 'date_of_service integrity', ok: reconciliation.checksum_date_of_service },
+ ]
  return (
  <div className="space-y-5">
- <div className="grid grid-cols-4 gap-4">
- <MetricCard label="Source rows" value={reconciliation.source_count} />
- <MetricCard label="Output rows" value={reconciliation.target_count} />
- <MetricCard label="Match rate" value={`${reconciliation.match_pct}%`} tone="text-emerald-700" />
- <MetricCard label="Anomalies quarantined" value={reconciliation.anomalies_quarantined} tone="text-amber-700" />
+ {/* Hero comparison */}
+ <div className="rounded-2xl border border-slate-200 bg-white shadow-sm overflow-hidden">
+ <div className="px-5 py-3 border-b border-slate-200 bg-slate-50 text-sm font-bold text-slate-900">Source vs FHIR Output — Comparison</div>
+ <div className="grid grid-cols-3 divide-x divide-slate-200">
+ <div className="p-6 text-center">
+ <div className="text-xs text-slate-500 uppercase tracking-wider mb-2">Source Records</div>
+ <div className="text-4xl font-bold font-mono text-slate-900">{reconciliation.source_count.toLocaleString()}</div>
+ <div className="text-xs text-slate-400 mt-1">extracted from PostgreSQL</div>
  </div>
- <Section title="What this agent is doing" subtitle="QA compares the original source volume with the final generated output and checks for gaps or mismatches.">
- <div className="grid grid-cols-2 gap-4">
- <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm"><div className="text-sm font-semibold text-slate-900 mb-2">Input</div><div className="text-sm text-slate-600">Source counts and loaded resource counts.</div></div>
- <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm"><div className="text-sm font-semibold text-slate-900 mb-2">Output</div><div className="text-sm text-slate-600">Match rate, violations, checksum signals, and anomaly summary.</div></div>
+ <div className="p-6 text-center">
+ <div className="text-xs text-slate-500 uppercase tracking-wider mb-2">FHIR Output</div>
+ <div className="text-4xl font-bold font-mono text-blue-700">{reconciliation.target_count.toLocaleString()}</div>
+ <div className="text-xs text-slate-400 mt-1">loaded to FHIR endpoint</div>
  </div>
- </Section>
- <TechnicalDetails title="QA technical details" data={reconciliation} />
+ <div className="p-6 text-center">
+ <div className="text-xs text-slate-500 uppercase tracking-wider mb-2">Match Rate</div>
+ <div className={clsx('text-4xl font-bold font-mono', matchColor)}>{match}%</div>
+ <div className="text-xs text-slate-400 mt-1">{match >= 99 ? 'Perfect match' : 'Some records differ'}</div>
+ </div>
+ </div>
+ </div>
+ {/* Status bar */}
+ <div className="rounded-2xl border border-slate-200 bg-white shadow-sm overflow-hidden">
+ <div className="px-5 py-3 border-b border-slate-200 bg-slate-50 text-sm font-bold text-slate-900">Data Integrity Checks</div>
+ <div className="divide-y divide-slate-100">
+ {checks.map(c => (
+ <div key={c.label} className="flex items-center justify-between px-5 py-4">
+ <div>
+ <div className="text-sm font-medium text-slate-900">{c.label}</div>
+ <div className="text-xs text-slate-500 mt-0.5">{c.ok ? 'Source and FHIR values match' : 'Mismatch detected between source and FHIR'}</div>
+ </div>
+ <span className={clsx('px-3 py-1.5 rounded-xl text-xs font-bold', c.ok ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700')}>
+ {c.ok ? 'PASS' : 'FAIL'}
+ </span>
+ </div>
+ ))}
+ </div>
+ </div>
+ {/* Anomalies */}
+ {reconciliation.anomalies_quarantined > 0 && (
+ <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 shadow-sm">
+ <div className="text-sm font-bold text-amber-800">{reconciliation.anomalies_quarantined} records quarantined</div>
+ <div className="text-xs text-amber-700 mt-1">These records had data quality issues and were not loaded to the FHIR endpoint.</div>
+ </div>
+ )}
+ <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+ <div className="text-sm font-semibold text-slate-900 mb-2">Summary</div>
+ <div className="text-sm text-slate-600">{reconciliation.matched} records matched successfully. {reconciliation.anomalies_quarantined} quarantined. {reconciliation.violations} business rule violations.</div>
+ </div>
  </div>
  )
 }
 
 function MonitorView() {
+ const agents = usePipelineStore(s => s.agents)
+ const monitorState = agents.monitor
+ const drift = usePipelineStore(s => s.schemaDrift)
  return (
  <div className="space-y-5">
- <Section title="What this agent is doing" subtitle="The monitor watches the source schema in the background to ensure the pipeline is not working against a moving target.">
- <div className="rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-700 shadow-sm">If a source table changes structure during the run, this agent can raise a drift warning and stop execution for review.</div>
- </Section>
+ <div className="rounded-2xl border border-slate-200 bg-white shadow-sm overflow-hidden">
+ <div className="px-5 py-3 border-b border-slate-200 bg-slate-50 text-sm font-bold text-slate-900">Schema Watch Status</div>
+ <div className="divide-y divide-slate-100">
+ {['members','eligibility','claims'].map(t => (
+ <div key={t} className="flex items-center justify-between px-5 py-4">
+ <div>
+ <div className="text-sm font-medium text-slate-900 capitalize">{t}</div>
+ <div className="text-xs text-slate-500 mt-0.5">Monitoring column structure every 30 seconds</div>
+ </div>
+ <span className={clsx('px-3 py-1.5 rounded-xl text-xs font-bold', drift ? 'bg-red-100 text-red-700' : 'bg-emerald-100 text-emerald-700')}>
+ {drift ? 'DRIFT DETECTED' : 'Stable'}
+ </span>
+ </div>
+ ))}
+ </div>
+ </div>
+ {drift ? (
+ <div className="rounded-2xl border border-red-200 bg-red-50 p-5 shadow-sm">
+ <div className="text-sm font-bold text-red-800 mb-2">Schema drift detected — pipeline halted</div>
+ <div className="text-sm text-red-700">{drift.details}</div>
+ <div className="mt-3 space-y-1">
+ {drift.column_changes.map((c, i) => (
+ <div key={i} className={clsx('text-xs px-3 py-1.5 rounded-lg font-mono', c.change_type === 'added' ? 'bg-emerald-100 text-emerald-800' : 'bg-red-100 text-red-800')}>
+ {c.change_type === 'added' ? '+' : '−'} {c.table}.{c.column}
+ </div>
+ ))}
+ </div>
+ </div>
+ ) : (
+ <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 shadow-sm">
+ <div className="text-sm font-semibold text-emerald-800">No schema drift detected</div>
+ <div className="text-xs text-emerald-700 mt-1">The source tables have maintained their structure throughout this run. Status: {monitorState.status}</div>
+ </div>
+ )}
  </div>
  )
 }
 
-export default function MigrationView() {
+export default function MigrationView({ onGoHome }: { onGoHome?: () => void } = {}) {
  const activeTab = usePipelineStore((s) => s.activeAgentTab)
  const setActiveTab = usePipelineStore((s) => s.setActiveAgentTab)
  const stage = usePipelineStore((s) => s.stage)
@@ -361,7 +443,7 @@ export default function MigrationView() {
 
  return (
  <div className="flex flex-col h-full bg-slate-100">
- {isDone && <div className="flex items-center justify-between px-4 py-2.5 border-b border-slate-200 bg-white shrink-0"><div className={clsx('text-sm font-semibold', stage === 'COMPLETE' ? 'text-emerald-700' : 'text-red-700')}>{stage === 'COMPLETE' ? 'Run complete' : 'Pipeline halted'}</div><button onClick={resetFn} className="px-4 py-1.5 bg-blue-600 hover:bg-blue-500 text-white font-semibold text-sm rounded-lg transition-all">New Run</button></div>}
+ {isDone && <div className="flex items-center justify-between px-4 py-2.5 border-b border-slate-200 bg-white shrink-0"><div className={clsx('text-sm font-semibold', stage === 'COMPLETE' ? 'text-emerald-700' : 'text-red-700')}>{stage === 'COMPLETE' ? 'Run complete' : 'Pipeline halted'}</div><button onClick={() => { resetFn(); onGoHome?.() }} className="px-4 py-1.5 bg-blue-600 hover:bg-blue-500 text-white font-semibold text-sm rounded-lg transition-all">Back to Home</button></div>}
  <div className="flex flex-1 gap-0 p-4 min-h-0">
  <div className="w-80 shrink-0 border-r border-slate-200 pr-3 overflow-y-auto">
  <div className="text-[10px] text-slate-500 uppercase tracking-wider font-semibold px-2 pb-2">Agents</div>

@@ -250,6 +250,21 @@ async def get_runs():
     return JSONResponse(get_all_runs())
 
 
+@app.delete("/api/runs/{run_id}")
+async def delete_run(run_id: str):
+    import psycopg2
+    conn = psycopg2.connect(settings.sync_database_url)
+    cur = conn.cursor()
+    cur.execute('DELETE FROM run_logs WHERE run_id=%s', (run_id,))
+    cur.execute('DELETE FROM run_agent_outputs WHERE run_id=%s', (run_id,))
+    cur.execute('DELETE FROM migration_runs WHERE run_id=%s', (run_id,))
+    cur.execute('DELETE FROM fhir_loaded_resources WHERE run_id=%s', (run_id,))
+    conn.commit(); cur.close(); conn.close()
+    from run_store import get_all_runs
+    await ws_manager.broadcast("RUNS_UPDATED", {"runs": get_all_runs()})
+    return JSONResponse({"status": "deleted"})
+
+
 @app.delete("/api/runs")
 async def delete_runs():
     import psycopg2

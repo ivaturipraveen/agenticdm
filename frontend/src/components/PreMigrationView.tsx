@@ -54,7 +54,7 @@ const STAGES = [
   { num: 5, title: 'Integration Monitor Agent', subtitle: 'Watches for schema changes that would affect the run.' },
 ]
 
-export default function PreMigrationView() {
+export default function PreMigrationView({ onStartRun }: { onStartRun?: () => void } = {}) {
   const [db, setDb] = useState<DbPreview | null>(null)
   const [loading, setLoading] = useState(false)
   const selectedDatasetId = usePipelineStore(s => s.selectedDatasetId)
@@ -106,7 +106,7 @@ export default function PreMigrationView() {
                   </div>
                 ) : (
                   <button
-                    onClick={startFn}
+                    onClick={async () => { await startFn(); onStartRun?.() }}
                     disabled={loading || !db}
                     className="px-8 py-3 bg-blue-600 hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed text-white font-bold rounded-2xl text-sm shadow-sm transition-all"
                   >
