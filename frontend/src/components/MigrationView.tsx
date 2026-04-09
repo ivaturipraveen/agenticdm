@@ -112,22 +112,96 @@ function ReviewCard({ item }: { item: ReviewItem }) {
 function DiscoveryView() {
  const schemaMapping = usePipelineStore(s => s.schemaMapping)
  const pendingReviews = usePipelineStore(s => s.pendingReviews)
- if (!schemaMapping) return <div className="text-slate-500">Discovery has not produced output yet.</div>
+ if (!schemaMapping) return (
+ <div className="p-8 flex flex-col items-center gap-3 text-slate-400">
+ <div className="w-12 h-12 border-2 border-slate-300 border-t-blue-500 rounded-full animate-spin" />
+ <div className="text-base">Discovery is running…</div>
+ </div>
+ )
  return (
  <div className="space-y-5">
+ {/* Summary metrics */}
  <div className="grid grid-cols-4 gap-4">
  <MetricCard label="Tables scanned" value={schemaMapping.summary.tables_scanned} />
  <MetricCard label="Source rows" value={schemaMapping.summary.total_rows.toLocaleString()} />
  <MetricCard label="Auto-mapped fields" value={schemaMapping.summary.auto_mapped_fields} tone="text-emerald-700" />
- <MetricCard label="Review fields" value={schemaMapping.summary.requires_review_fields} tone="text-amber-700" />
+ <MetricCard label="Needs review" value={schemaMapping.summary.requires_review_fields} tone={schemaMapping.summary.requires_review_fields > 0 ? 'text-amber-700' : 'text-slate-500'} />
  </div>
- <Section title="What this agent is doing" subtitle="Discovery reads source tables, identifies likely FHIR resources, and proposes source-to-target mappings.">
- <div className="grid grid-cols-1 gap-4">{schemaMapping.mapping_summary.map((table) => <MappingTableCard key={table.table} table={table} />)}</div>
+
+ {/* Role explanation */}
+ <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+ <div className="text-sm font-bold text-slate-900 mb-1">What is this agent doing?</div>
+ <div className="text-sm text-slate-600 leading-relaxed">
+ The Discovery Agent reads every source table, inspects column names, data types, and sample values, then decides which FHIR resource type each table most likely represents.
+ It assigns a <strong>confidence score</strong> to every field mapping. Fields with high confidence are auto-mapped. Fields with lower confidence are flagged for human review before the pipeline continues.
+ </div>
+ </div>
+
+ {/* Mapping results per table */}
+ <Section title="Mapping Results" subtitle="For each source table, this shows the inferred FHIR resource and how every column was mapped.">
+ <div className="space-y-4">
+ {schemaMapping.mapping_summary.map((table) => (
+ <div key={table.table} className="rounded-2xl border border-slate-200 bg-white overflow-hidden shadow-sm">
+ <div className="px-4 py-3 border-b border-slate-200 bg-slate-50 flex items-center justify-between">
+ <div>
+ <span className="font-semibold text-slate-900">{table.table}</span>
+ <span className="mx-2 text-slate-400">{'->'}</span>
+ <span className="font-semibold text-blue-700">{table.resource}</span>
+ <span className="ml-2 text-xs text-slate-500">• {table.row_count.toLocaleString()} rows • {Math.round(table.resource_confidence * 100)}% confidence</span>
+ </div>
+ <div className="flex gap-3 text-xs">
+ <span className="text-emerald-700 font-semibold">{table.fields.filter(f => f.status === 'auto_mapped').length} auto-mapped</span>
+ {table.fields.filter(f => f.status === 'requires_review').length > 0 && <span className="text-amber-700 font-semibold">{table.fields.filter(f => f.status === 'requires_review').length} for review</span>}
+ </div>
+ </div>
+ <table className="w-full text-xs">
+ <thead><tr className="bg-slate-50 border-b border-slate-100">
+ <th className="text-left px-4 py-2.5 text-slate-500 font-semibold w-[30%]">Source column</th>
+ <th className="text-left px-4 py-2.5 text-slate-500 font-semibold w-[38%]">FHIR R4 field</th>
+ <th className="text-left px-4 py-2.5 text-slate-500 font-semibold w-[18%]">Confidence</th>
+ <th className="text-left px-4 py-2.5 text-slate-500 font-semibold w-[14%]">Status</th>
+ </tr></thead>
+ <tbody>
+ {table.fields.map((field) => (
+ <tr key={field.source_column} className="border-b border-slate-100 last:border-0 hover:bg-slate-50/50">
+ <td className="px-4 py-2.5 font-mono text-slate-700">{field.source_column}</td>
+ <td className="px-4 py-2.5 font-mono text-blue-700 truncate max-w-[200px]">{field.target_field || <span className="text-slate-400">—</span>}</td>
+ <td className="px-4 py-2.5">
+ <div className="flex items-center gap-2">
+ <div className="flex-1 h-1.5 bg-slate-100 rounded-full overflow-hidden">
+ <div className={clsx('h-full rounded-full', field.confidence >= 0.85 ? 'bg-emerald-500' : field.confidence >= 0.55 ? 'bg-amber-400' : 'bg-slate-300')} style={{ width: `${Math.round(field.confidence * 100)}%` }} />
+ </div>
+ <span className="text-slate-600 font-mono">{Math.round(field.confidence * 100)}%</span>
+ </div>
+ </td>
+ <td className="px-4 py-2.5">
+ <span className={clsx('px-2 py-0.5 rounded-full text-[11px] font-semibold', field.status === 'auto_mapped' ? 'bg-emerald-100 text-emerald-700' : field.status === 'requires_review' ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-500')}>
+ {field.status === 'auto_mapped' ? 'Auto-mapped' : field.status === 'requires_review' ? 'Needs review' : 'Ignored'}
+ </span>
+ </td>
+ </tr>
+ ))}
+ </tbody>
+ </table>
+ </div>
+ ))}
+ </div>
  </Section>
- <Section title="Review-required mappings" subtitle="These mappings are uncertain and can be accepted, rejected, or edited before the pipeline continues.">
- {pendingReviews.length === 0 ? <div className="rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-500 shadow-sm">No unresolved review items.</div> : <div className="space-y-3">{pendingReviews.map((item, idx) => <ReviewCard key={`${item.table}-${item.source_column}-${idx}`} item={item} />)}</div>}
+
+ {/* Review queue */}
+ {pendingReviews.length > 0 && (
+ <Section title={`Review Queue (${pendingReviews.length})`} subtitle="The pipeline is paused here. Accept, reject, or edit each mapping to continue.">
+ <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 mb-3 text-sm text-amber-800">
+ These {pendingReviews.length} field mapping{pendingReviews.length > 1 ? 's were' : ' was'} flagged because the system's confidence was below the threshold. Review and confirm each one to continue.
+ </div>
+ <div className="space-y-3">{pendingReviews.map((item, idx) => <ReviewCard key={`${item.table}-${item.source_column}-${idx}`} item={item} />)}</div>
  </Section>
- <TechnicalDetails title="Discovery technical details" data={schemaMapping} />
+ )}
+ {pendingReviews.length === 0 && schemaMapping.summary.requires_review_fields === 0 && (
+ <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-700 shadow-sm">
+ All fields were auto-mapped with high confidence. No review required — the pipeline will continue.
+ </div>
+ )}
  </div>
  )
 }
@@ -202,22 +276,31 @@ function OrchestrationView() {
  </div>
  </Section>
 
- <Section title="Load summary" subtitle="Resources prepared for target delivery and post-load handoff.">
+ {/* FHIR endpoint */}
+ <div className="rounded-2xl border border-cyan-200 bg-cyan-50 p-4 shadow-sm">
+ <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">FHIR Target Endpoint</div>
+ <div className="font-mono text-cyan-800 text-sm">
+ {(migrationSummary?.agent_outputs as any)?.fhir_url || 'Configured via FHIR_BASE_URL'}
+ </div>
+ <div className="text-xs text-slate-500 mt-1">Resources are sent to this endpoint in batches. Results are also stored in the local FHIR Registry.</div>
+ </div>
+
+ <Section title="Load summary by resource type" subtitle="How many FHIR resources were sent for each type.">
  <div className="grid grid-cols-3 gap-4">{Object.entries(counts).map(([k, v]) => <MetricCard key={k} label={k} value={v as number} tone="text-cyan-700" />)}</div>
  </Section>
 
- <Section title="Approval and handoff" subtitle="Shows the gate status before load and the transition into QA after load completes.">
+ <Section title="Approval gate" subtitle="The pipeline pauses here and waits for human confirmation before sending data to FHIR.">
  <div className="grid grid-cols-2 gap-4">
- <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm"><div className="text-sm font-semibold text-slate-900 mb-2">Approval Gate</div><div className="text-sm text-slate-700 leading-relaxed">{approvalGate ? `Waiting to load ${approvalGate.records_to_load} records with ${approvalGate.anomaly_count} flagged anomalies at ${approvalGate.success_rate}% success rate.` : 'No active approval gate right now.'}</div></div>
- <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm"><div className="text-sm font-semibold text-slate-900 mb-2">QA Handoff</div><div className="text-sm text-slate-700 leading-relaxed">After load, Orchestration hands the final output counts and loaded resources to the QA / Reconciliation Agent for integrity checks.</div></div>
+ <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+ <div className="text-sm font-semibold text-slate-900 mb-2">Gate status</div>
+ <div className="text-sm text-slate-700 leading-relaxed">{approvalGate ? `Waiting to load ${approvalGate.records_to_load.toLocaleString()} records with ${approvalGate.anomaly_count} anomalies quarantined. Success rate: ${approvalGate.success_rate}%.` : 'Gate cleared — approved to load.'}</div>
+ </div>
+ <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+ <div className="text-sm font-semibold text-slate-900 mb-2">After approval</div>
+ <div className="text-sm text-slate-700 leading-relaxed">Resources are batch-loaded to the FHIR endpoint above and stored in the FHIR Registry. The QA Agent then verifies the counts.</div>
+ </div>
  </div>
  </Section>
-
- <Section title="Target delivery samples" subtitle="Examples of the FHIR-ready data sent during load.">
- <div className="grid grid-cols-2 gap-4">{fhirSamples.slice(0, 2).map((sample: unknown, idx: number) => <div key={idx} className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm"><div className="text-sm font-semibold text-slate-900 mb-2">Loaded sample {idx + 1}</div><pre className="text-xs text-slate-700 whitespace-pre-wrap overflow-x-auto">{JSON.stringify(sample, null, 2)}</pre></div>)}</div>
- </Section>
-
- <TechnicalDetails title="Orchestration technical details" data={migrationSummary?.agent_outputs || {}} />
  </div>
  )
 }
