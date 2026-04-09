@@ -49,24 +49,68 @@ function FinalResultsView({ runId, datasetName }: { runId: string; datasetName: 
  return <DataView runId={runId} datasetName={datasetName} />
 }
 
+const STAGE_IO: Record<string, { inputLabel: string; inputDesc: string; outputLabel: string; outputDesc: string }> = {
+ discovery: {
+ inputLabel: 'Source Schema', inputDesc: 'Raw PostgreSQL table names, column names, data types, and sample rows.',
+ outputLabel: 'Mapping Contract', outputDesc: 'Inferred FHIR resource types and field mappings with confidence scores passed to the Transformation Agent.',
+ },
+ transformation: {
+ inputLabel: 'Mapping Contract + Source Rows', inputDesc: 'The confirmed field mappings from Discovery and the actual source data rows.',
+ outputLabel: 'FHIR Resources', outputDesc: 'Converted FHIR-ready records ready for approval and load. Anomalies are quarantined.',
+ },
+ orchestration: {
+ inputLabel: 'Validated FHIR Resources', inputDesc: 'FHIR-ready resources plus approval decision from human operator.',
+ outputLabel: 'Loaded FHIR Data', outputDesc: 'Resources posted to the FHIR target endpoint and stored locally in the FHIR Registry.',
+ },
+ qa: {
+ inputLabel: 'Source Counts + Loaded Counts', inputDesc: 'Original record volumes from the source database and final FHIR load totals.',
+ outputLabel: 'QA Report', outputDesc: 'Match rate, checksum signals, anomaly count, business rule violations, and compliance score.',
+ },
+}
+
 function StepView({ output, logs }: { output?: AgentOutput; logs: RunLog[] }) {
  if (!output) return <div className="p-5 text-slate-500">No output recorded for this step.</div>
  const meta = STEP_META[output.agent] || STEP_META.discovery
+ const io = STAGE_IO[output.agent]
  const reasoning = logs.filter(l => l.log_type === 'reasoning')
  return (
- <div className="flex-1 overflow-y-auto p-5 space-y-6 bg-slate-50/50">
+ <div className="flex-1 overflow-y-auto p-5 space-y-5 bg-slate-50/50">
+ {/* Agent header */}
  <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
  <div className="text-slate-900 font-bold text-2xl">{meta.title}</div>
  <div className="text-slate-600 text-sm mt-2 leading-relaxed">{meta.explanation}</div>
- <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 mt-4"><div className="text-[11px] uppercase tracking-wider text-slate-500 font-semibold mb-2">Why this stage exists</div><div className="text-sm text-slate-700">{meta.why}</div></div>
  </div>
- <div className="grid grid-cols-3 gap-4">
- <Metric label="Input Count" value={String(output.records_in ?? 0)} color="text-slate-700" />
- <Metric label="Output Count" value={String(output.records_out ?? 0)} color="text-blue-700" />
- <Metric label="Anomalies" value={String(output.anomalies ?? 0)} color="text-amber-700" />
+ {/* Input/Output boxes */}
+ {io && (
+ <div className="grid grid-cols-2 gap-4">
+ <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+ <div className="flex items-center gap-2 mb-3">
+ <div className="w-7 h-7 rounded-xl bg-slate-100 flex items-center justify-center text-xs font-bold text-slate-600">IN</div>
+ <div className="text-sm font-bold text-slate-900">{io.inputLabel}</div>
  </div>
- <JsonCard title="Stage Output Summary" data={output.output} />
- <JsonCard title="Stage Reasoning" data={reasoning} />
+ <div className="text-sm text-slate-600 leading-relaxed">{io.inputDesc}</div>
+ <div className="mt-3 text-2xl font-bold font-mono text-slate-900">{(output.records_in ?? 0).toLocaleString()}<span className="text-sm font-normal text-slate-500 ml-2">records</span></div>
+ </div>
+ <div className="rounded-2xl border border-blue-200 bg-blue-50 p-5 shadow-sm">
+ <div className="flex items-center gap-2 mb-3">
+ <div className="w-7 h-7 rounded-xl bg-blue-100 flex items-center justify-center text-xs font-bold text-blue-700">OUT</div>
+ <div className="text-sm font-bold text-slate-900">{io.outputLabel}</div>
+ </div>
+ <div className="text-sm text-slate-600 leading-relaxed">{io.outputDesc}</div>
+ <div className="mt-3 text-2xl font-bold font-mono text-blue-700">{(output.records_out ?? 0).toLocaleString()}<span className="text-sm font-normal text-slate-500 ml-2">records</span></div>
+ </div>
+ </div>
+ )}
+ {/* Anomalies if any */}
+ {(output.anomalies ?? 0) > 0 && (
+ <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 shadow-sm">
+ <div className="text-sm font-bold text-amber-800">{output.anomalies} anomalies quarantined</div>
+ <div className="text-xs text-amber-700 mt-1">These records had data quality issues and were not passed to the next stage.</div>
+ </div>
+ )}
+ {/* Output summary - collapsible */}
+ <JsonCard title="Stage Output Data" data={output.output} />
+ {reasoning.length > 0 && <JsonCard title="Agent Reasoning Log" data={reasoning.map(r => ({ step: r.action, detail: r.details, time: new Date(r.timestamp).toLocaleTimeString() }))} />}
  </div>
  )
 }

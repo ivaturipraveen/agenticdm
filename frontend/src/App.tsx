@@ -43,7 +43,7 @@ export default function App() {
  {[
  { id: 'migrate' as const, label: 'Migration' },
  { id: 'history' as const, label: 'Run History', badge: completedRuns > 0 ? String(completedRuns) : null },
- { id: 'fhir' as const, label: 'FHIR Data' },
+ { id: 'fhir' as const, label: 'FHIR Registry' },
  { id: 'target' as const, label: 'Target' },
  { id: 'mock' as const, label: 'Mock Controls' },
  ].map(t => (

@@ -749,3 +749,4 @@
 {"timestamp": "2026-04-09T11:11:56.382274+00:00", "agent": "qa", "action": "Post-load reconciliation started", "status": "pending", "records_affected": 650, "details": ""}
 {"timestamp": "2026-04-09T11:11:57.029380+00:00", "agent": "qa", "action": "Reconciliation complete", "status": "success", "records_affected": 650, "details": "Source: 500, Target: 650, Match: 100.0%, Violations: 350, Checksum member_id: PASS, Checksum claim_amount: FAIL, Checksum date_of_service: FAIL"}
 {"timestamp": "2026-04-09T11:12:04.714572+00:00", "agent": "orchestration", "action": "Migration pipeline COMPLETE", "status": "success", "records_affected": 650, "details": "Source: 650 -> FHIR: 650. Review: 0. Validation failures: 0. Compliance: 100.0%"}
+{"timestamp": "2026-04-09T11:16:21.261121+00:00", "agent": "monitor", "action": "SCHEMA_DRIFT_DETECTED", "status": "failed", "records_affected": 0, "details": "ADDED claims.drift_probe_text"}
