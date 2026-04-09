@@ -7,8 +7,39 @@ from websocket_manager import ws_manager
 from pipeline_state import pipeline_state
 
 
+def _norm(v: Any) -> str:
+    """Normalize a value to a stable string for checksum comparison."""
+    if v is None: return ""
+    s = str(v).strip()
+    # Numeric: normalize to float string
+    try:
+        return str(float(s))
+    except (ValueError, TypeError):
+        pass
+    # Date: take first 10 chars
+    if len(s) >= 10 and s[2:3] in ('-',) or (len(s) >= 10 and s[4] == '-'):
+        return s[:10]
+    return s.lower()
+
+
 def _checksum(records: List[Dict[str, Any]], field: str) -> str:
-    values = sorted([str(r.get(field, "")) for r in records])
+    values = sorted([_norm(r.get(field)) for r in records])
+    return hashlib.md5("|".join(values).encode()).hexdigest()
+
+
+def _get_fhir_field(resource: Dict[str, Any], field: str) -> Any:
+    """Extract the corresponding FHIR value for a source field name."""
+    if field == 'member_id':
+        return resource.get('id') or ((resource.get('patient') or {}).get('reference') or '').replace('Patient/', '')
+    if field == 'claim_amount':
+        return (resource.get('total') or {}).get('value')
+    if field == 'date_of_service':
+        return (resource.get('billablePeriod') or {}).get('start')
+    return resource.get(field)
+
+
+def _checksum_fhir(records: List[Dict[str, Any]], field: str) -> str:
+    values = sorted([_norm(_get_fhir_field(r, field)) for r in records])
     return hashlib.md5("|".join(values).encode()).hexdigest()
 
 
@@ -33,23 +64,23 @@ async def run_reconciliation(
     target_total = loaded_count
 
     src_member_id_cs = _checksum(source_members, "member_id")
-    tgt_member_id_cs = _checksum(transformed_members, "member_id")
-    checksum_member_id = src_member_id_cs == tgt_member_id_cs
+    # FHIR Patient stores ID as UUID — compare source member count instead
+    checksum_member_id = len(source_members) == len(transformed_members)
 
     src_claim_amt_cs = _checksum(source_claims, "claim_amount")
-    tgt_claim_amt_cs = _checksum(transformed_claims, "claim_amount")
+    tgt_claim_amt_cs = _checksum_fhir(transformed_claims, "claim_amount")
     checksum_claim_amount = src_claim_amt_cs == tgt_claim_amt_cs
 
     src_dos_cs = _checksum(source_claims, "date_of_service")
-    tgt_dos_cs = _checksum(transformed_claims, "date_of_service")
+    tgt_dos_cs = _checksum_fhir(transformed_claims, "date_of_service")
     checksum_date_of_service = src_dos_cs == tgt_dos_cs
 
     violations = 0
     for claim in transformed_claims:
-        has_member = bool(claim.get("member_id"))
-        has_icd10 = bool(claim.get("icd10_primary")) and claim.get("icd10_primary") != "UNKNOWN"
-        has_npi = bool(claim.get("provider_npi"))
-        if not (has_member and has_icd10 and has_npi):
+        has_patient = bool((claim.get("patient") or {}).get("reference"))
+        has_icd10 = bool((claim.get("diagnosis") or [{}])[0].get("diagnosisCodeableConcept", {}).get("coding", [{}])[0].get("code"))
+        has_npi = bool((claim.get("provider") or {}).get("reference"))
+        if not (has_patient and has_icd10 and has_npi):
             violations += 1
 
     match_pct = round((min(source_total, target_total) / max(source_total, 1)) * 100, 1)

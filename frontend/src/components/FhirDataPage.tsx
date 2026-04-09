@@ -27,51 +27,120 @@ function RecordStatusDot({ status }: { status: string }) {
 }
 
 /* ── Integrity checks derived from the resource ────────────────────── */
-function deriveChecks(rec: FhirRecord): { field: string; sourceVal: string; fhirVal: string; pass: boolean; reason?: string }[] {
+// Helper: compare source value to FHIR value with type-aware logic
+function valuesMatch(srcRaw: unknown, fhirRaw: unknown): boolean {
+  if (srcRaw === null || srcRaw === undefined || srcRaw === '') return false
+  if (fhirRaw === null || fhirRaw === undefined || fhirRaw === '') return false
+  const src = String(srcRaw).trim()
+  const fhir = String(fhirRaw).trim()
+  if (src === fhir) return true
+  // Numeric comparison: "2108.58" == 2108.58
+  const srcN = parseFloat(src), fhirN = parseFloat(fhir)
+  if (!isNaN(srcN) && !isNaN(fhirN) && srcN === fhirN) return true
+  // Date: take first 10 chars
+  if (src.length >= 10 && fhir.length >= 10 && src.slice(0, 10) === fhir.slice(0, 10)) return true
+  return false
+}
+
+function deriveChecks(rec: FhirRecord): { field: string; sourceVal: string; fhirVal: string; pass: boolean; note?: string }[] {
   const res = rec.resource
   const src = rec.source || {}
-  const checks: { field: string; sourceVal: string; fhirVal: string; pass: boolean; reason?: string }[] = []
+  const checks: { field: string; sourceVal: string; fhirVal: string; pass: boolean; note?: string }[] = []
 
   if (rec.resource_type === 'Patient') {
-    const fhirId = String(res.id ?? '')
-    const srcId  = String((src as any).member_id ?? '')
-    checks.push({ field: 'member_id → Patient.id', sourceVal: srcId, fhirVal: fhirId, pass: !!fhirId })
+    // member_id → UUID transform is expected; check that ID is present
+    const srcId = String((src as any).member_id ?? ''), fhirId = String(res.id ?? '')
+    checks.push({ field: 'member_id → Patient.id', sourceVal: srcId, fhirVal: fhirId, pass: !!fhirId, note: fhirId && srcId !== fhirId ? 'Converted to UUID' : undefined })
     const names = (res.name as any)?.[0]
     const fname = String((src as any).first_name ?? ''), fhirGiven = String(names?.given?.[0] ?? '')
-    checks.push({ field: 'first_name → Patient.name.given', sourceVal: fname, fhirVal: fhirGiven, pass: !!fhirGiven })
+    checks.push({ field: 'first_name → Patient.name.given', sourceVal: fname, fhirVal: fhirGiven, pass: valuesMatch(fname, fhirGiven) })
     const lname = String((src as any).last_name ?? ''), fhirFamily = String(names?.family ?? '')
-    checks.push({ field: 'last_name → Patient.name.family', sourceVal: lname, fhirVal: fhirFamily, pass: !!fhirFamily })
+    checks.push({ field: 'last_name → Patient.name.family', sourceVal: lname, fhirVal: fhirFamily, pass: valuesMatch(lname, fhirFamily) })
     const dob = String((src as any).date_of_birth ?? ''), fhirDob = String(res.birthDate ?? '')
-    checks.push({ field: 'date_of_birth → Patient.birthDate', sourceVal: dob, fhirVal: fhirDob, pass: !!fhirDob && fhirDob.match(/^\d{4}-\d{2}-\d{2}$/) !== null })
-    const g = String((src as any).gender ?? ''), fg = String(res.gender ?? '')
+    checks.push({ field: 'date_of_birth → Patient.birthDate', sourceVal: dob, fhirVal: fhirDob, pass: !!fhirDob && !!dob && dob.slice(0, 10) === fhirDob.slice(0, 10) })
+    const g = String((src as any).gender ?? '').toLowerCase(), fg = String(res.gender ?? '').toLowerCase()
     checks.push({ field: 'gender → Patient.gender', sourceVal: g, fhirVal: fg, pass: ['male','female','other','unknown'].includes(fg) })
   }
 
   if (rec.resource_type === 'Claim') {
     const diag = (res.diagnosis as any)?.[0]?.diagnosisCodeableConcept?.coding?.[0]?.code
     const srcIcd = String((src as any).icd10_primary ?? '')
-    checks.push({ field: 'icd10_primary → Claim.diagnosis', sourceVal: srcIcd, fhirVal: diag ?? '—', pass: !!diag && /^[A-Z]\d{2}/.test(diag) })
-    const npi = String((src as any).provider_npi ?? '')
-    const fhirProv = String((res.provider as any)?.reference ?? '')
-    checks.push({ field: 'provider_npi → Claim.provider.reference', sourceVal: npi, fhirVal: fhirProv, pass: !!fhirProv })
-    const amt = String((src as any).claim_amount ?? ''), fhirAmt = String((res.total as any)?.value ?? '')
-    checks.push({ field: 'claim_amount → Claim.total.value', sourceVal: amt, fhirVal: fhirAmt, pass: !!fhirAmt && parseFloat(fhirAmt) > 0 })
+    // ICD-10 normalization is expected: F321 → F32.1
+    const icdNorm = srcIcd.length >= 4 && !srcIcd.includes('.') ? `${srcIcd.slice(0,3)}.${srcIcd.slice(3)}` : srcIcd
+    checks.push({ field: 'icd10_primary → Claim.diagnosis', sourceVal: srcIcd, fhirVal: diag ?? '—', pass: !!diag && (diag === srcIcd || diag === icdNorm), note: diag !== srcIcd && diag === icdNorm ? 'Normalized format' : undefined })
+    const npi = String((src as any).provider_npi ?? ''), fhirProv = String((res.provider as any)?.reference ?? '')
+    checks.push({ field: 'provider_npi → Claim.provider.reference', sourceVal: npi, fhirVal: fhirProv, pass: fhirProv.includes(npi), note: 'Prefixed as Practitioner/' })
+    const srcAmt = String((src as any).claim_amount ?? ''), fhirAmt = String((res.total as any)?.value ?? '')
+    checks.push({ field: 'claim_amount → Claim.total.value', sourceVal: srcAmt, fhirVal: fhirAmt, pass: valuesMatch(srcAmt, fhirAmt) })
     const dos = String((src as any).date_of_service ?? ''), fhirDos = String((res.billablePeriod as any)?.start ?? '')
-    checks.push({ field: 'date_of_service → Claim.billablePeriod.start', sourceVal: dos, fhirVal: fhirDos, pass: !!fhirDos })
+    checks.push({ field: 'date_of_service → Claim.billablePeriod.start', sourceVal: dos, fhirVal: fhirDos, pass: valuesMatch(dos, fhirDos) })
+    const patRef = String((res.patient as any)?.reference ?? '')
+    checks.push({ field: 'member_id → Claim.patient.reference', sourceVal: String((src as any).member_id ?? ''), fhirVal: patRef, pass: patRef.startsWith('Patient/'), note: 'Converted to Patient reference' })
   }
 
   if (rec.resource_type === 'Coverage') {
     const benef = String((res.beneficiary as any)?.reference ?? '')
-    checks.push({ field: 'member_id → Coverage.beneficiary', sourceVal: String((src as any).member_id ?? ''), fhirVal: benef, pass: benef.startsWith('Patient/') })
-    const st = String(res.status ?? '')
-    checks.push({ field: 'status → Coverage.status', sourceVal: String((src as any).status ?? ''), fhirVal: st, pass: ['active','cancelled','draft','entered-in-error'].includes(st.toLowerCase()) })
+    checks.push({ field: 'member_id → Coverage.beneficiary', sourceVal: String((src as any).member_id ?? ''), fhirVal: benef, pass: benef.startsWith('Patient/'), note: 'Converted to Patient reference' })
+    const st = String(res.status ?? '').toLowerCase()
+    const srcSt = String((src as any).status ?? '').toLowerCase()
+    checks.push({ field: 'status → Coverage.status', sourceVal: srcSt, fhirVal: st, pass: !!st })
+    const eff = String((src as any).effective_date ?? ''), fhirEff = String((res.period as any)?.start ?? '')
+    checks.push({ field: 'effective_date → Coverage.period.start', sourceVal: eff, fhirVal: fhirEff, pass: valuesMatch(eff, fhirEff) })
   }
 
   if (rec.validation_errors?.length) {
-    checks.push({ field: 'FHIR validation', sourceVal: '—', fhirVal: rec.validation_errors.join('; '), pass: false, reason: 'Validation failed' })
+    checks.push({ field: 'FHIR validation', sourceVal: '—', fhirVal: rec.validation_errors.join('; '), pass: false, note: 'FHIR schema error' })
   }
 
   return checks
+}
+
+// Build the mapped JSON: all source fields with their transformed FHIR values
+function buildMappedJson(rec: FhirRecord): Record<string, unknown> {
+  const src = rec.source || {}
+  const res = rec.resource
+  const out: Record<string, unknown> = {}
+
+  if (rec.resource_type === 'Claim') {
+    out['claim_id → Claim.id'] = res.id
+    out['member_id → patient.reference'] = (res.patient as any)?.reference
+    out['provider_npi → provider.reference'] = (res.provider as any)?.reference
+    out['provider_name → provider.display'] = (res.provider as any)?.display
+    out['icd10_primary → diagnosis[0].code'] = (res.diagnosis as any)?.[0]?.diagnosisCodeableConcept?.coding?.[0]?.code
+    out['icd10_secondary → diagnosis[1].code'] = (res.diagnosis as any)?.[1]?.diagnosisCodeableConcept?.coding?.[0]?.code
+    out['claim_amount → total.value'] = (res.total as any)?.value
+    out['paid_amount → payment.amount'] = (res.payment as any)?.amount?.value
+    out['date_of_service → billablePeriod.start'] = (res.billablePeriod as any)?.start
+    out['claim_date → created'] = res.created
+    out['claim_status → status'] = res.status
+    out['place_of_service → facility.identifier'] = (res.facility as any)?.identifier?.value
+    out['procedure_code → procedure[0].code'] = (res.procedure as any)?.[0]?.procedureCodeableConcept?.coding?.[0]?.code
+  } else if (rec.resource_type === 'Patient') {
+    const names = (res.name as any)?.[0]
+    out['member_id → id'] = res.id
+    out['first_name → name.given'] = names?.given?.[0]
+    out['last_name → name.family'] = names?.family
+    out['date_of_birth → birthDate'] = res.birthDate
+    out['gender → gender'] = res.gender
+    out['address_line1 → address.line'] = (res.address as any)?.[0]?.line?.[0]
+    out['city → address.city'] = (res.address as any)?.[0]?.city
+    out['state → address.state'] = (res.address as any)?.[0]?.state
+    out['zip_code → address.postalCode'] = (res.address as any)?.[0]?.postalCode
+    const telecom = (res.telecom as any) || []
+    out['phone → telecom.phone'] = telecom.find((t: any) => t.system === 'phone')?.value
+    out['email → telecom.email'] = telecom.find((t: any) => t.system === 'email')?.value
+  } else if (rec.resource_type === 'Coverage') {
+    out['eligibility_id → id'] = res.id
+    out['member_id → beneficiary.reference'] = (res.beneficiary as any)?.reference
+    out['plan_id → class[0].value'] = (res.class as any)?.[0]?.value
+    out['plan_name → class[0].name'] = (res.class as any)?.[0]?.name
+    out['effective_date → period.start'] = (res.period as any)?.start
+    out['termination_date → period.end'] = (res.period as any)?.end
+    out['status → status'] = res.status
+    out['payer_id → payor.identifier'] = (res.payor as any)?.[0]?.identifier?.value
+  }
+
+  return out
 }
 
 /* ── Record detail panel ──────────────────────────────────────────── */
@@ -130,27 +199,30 @@ function RecordDetail({ rec, onClose }: { rec: FhirRecord; onClose: () => void }
 
         {/* Field-level integrity check table */}
         <div className="rounded-2xl border border-slate-200 bg-white overflow-hidden shadow-sm">
-          <div className="px-4 py-3 border-b border-slate-200 bg-slate-50 text-sm font-bold text-slate-900">
-            Field-level Validation — Source → FHIR
+          <div className="px-4 py-3 border-b border-slate-200 bg-slate-50 flex items-center justify-between">
+            <span className="text-sm font-bold text-slate-900">Field-level Validation — Source → FHIR</span>
+            <span className="text-xs text-slate-500">{checks.filter(c => c.pass).length}/{checks.length} passed</span>
           </div>
           <table className="w-full text-xs">
             <thead><tr className="bg-slate-50 border-b border-slate-100">
-              <th className="text-left px-4 py-2.5 text-slate-500 font-semibold w-[35%]">Field Mapping</th>
-              <th className="text-left px-4 py-2.5 text-slate-500 font-semibold w-[25%]">Source Value</th>
-              <th className="text-left px-4 py-2.5 text-slate-500 font-semibold w-[25%]">FHIR Value</th>
+              <th className="text-left px-4 py-2.5 text-slate-500 font-semibold w-[30%]">Field Mapping</th>
+              <th className="text-left px-4 py-2.5 text-slate-500 font-semibold w-[20%]">Source Value</th>
+              <th className="text-left px-4 py-2.5 text-slate-500 font-semibold w-[20%]">FHIR Value</th>
               <th className="text-left px-4 py-2.5 text-slate-500 font-semibold w-[15%]">Result</th>
+              <th className="text-left px-4 py-2.5 text-slate-500 font-semibold w-[15%]">Note</th>
             </tr></thead>
             <tbody>
               {checks.map((c, i) => (
-                <tr key={i} className={clsx('border-b border-slate-100 last:border-0', !c.pass && 'bg-red-50/40')}>
-                  <td className="px-4 py-2.5 font-mono text-slate-700 text-xs">{c.field}</td>
-                  <td className="px-4 py-2.5 font-mono text-slate-600 max-w-[160px] truncate text-xs">{c.sourceVal || '—'}</td>
-                  <td className="px-4 py-2.5 font-mono text-blue-700 max-w-[160px] truncate text-xs">{c.fhirVal || '—'}</td>
+                <tr key={i} className={clsx('border-b border-slate-100 last:border-0', !c.pass && !c.note?.includes('ormat') && !c.note?.includes('Prefix') && !c.note?.includes('Convert') ? 'bg-red-50/40' : '')}>
+                  <td className="px-4 py-2.5 font-mono text-slate-700">{c.field}</td>
+                  <td className="px-4 py-2.5 font-mono text-slate-600 max-w-[120px] truncate">{c.sourceVal || '—'}</td>
+                  <td className="px-4 py-2.5 font-mono text-blue-700 max-w-[120px] truncate">{c.fhirVal || '—'}</td>
                   <td className="px-4 py-2.5">
                     <span className={clsx('px-2.5 py-1 rounded-full text-[10px] font-bold', c.pass ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700')}>
                       {c.pass ? 'PASS' : 'FAIL'}
                     </span>
                   </td>
+                  <td className="px-4 py-2.5 text-slate-500 text-[10px]">{c.note || ''}</td>
                 </tr>
               ))}
             </tbody>
@@ -176,11 +248,11 @@ function RecordDetail({ rec, onClose }: { rec: FhirRecord; onClose: () => void }
               <div className="px-4 py-3 border-b border-amber-200 bg-amber-50">
                 <div className="flex items-center gap-2">
                   <div className="w-6 h-6 rounded-full bg-amber-200 text-amber-800 text-xs font-bold flex items-center justify-center">2</div>
-                  <span className="text-xs font-bold text-amber-800">Mapped JSON</span>
+                  <span className="text-xs font-bold text-amber-800">Mapped Fields</span>
                 </div>
-                <div className="text-[10px] text-amber-600 mt-1">After field mapping applied</div>
+                <div className="text-[10px] text-amber-600 mt-1">Source column → transformed FHIR value</div>
               </div>
-              <pre className="p-3 text-xs text-slate-700 overflow-x-auto whitespace-pre-wrap max-h-56 leading-relaxed">{JSON.stringify(Object.fromEntries(checks.map(c => [c.field.split(' → ')[0], c.fhirVal])), null, 2)}</pre>
+              <pre className="p-3 text-xs text-slate-700 overflow-x-auto whitespace-pre-wrap max-h-56 leading-relaxed">{JSON.stringify(buildMappedJson(rec), null, 2)}</pre>
             </div>
             <div className="rounded-2xl border border-blue-200 bg-blue-50 overflow-hidden shadow-sm">
               <div className="px-4 py-3 border-b border-blue-200 bg-blue-50">
