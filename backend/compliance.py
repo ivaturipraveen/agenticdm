@@ -1,5 +1,6 @@
 """Compliance and accuracy metrics engine.
 Evaluates migrated data against HIPAA, FHIR R4, and CMS rules.
+Supports both source-style rows and generated FHIR resources.
 """
 from typing import List, Dict, Any
 import re
@@ -31,6 +32,61 @@ def check_gender(g: str) -> bool:
     return str(g or '').upper() in ('M', 'F', 'MALE', 'FEMALE', 'OTHER', 'UNKNOWN')
 
 
+def _patient_name_present(m: Dict[str, Any]) -> bool:
+    names = m.get('name') or []
+    if names and isinstance(names, list):
+        first = names[0] or {}
+        return bool(first.get('family') or first.get('given'))
+    return bool(m.get('first_name') and m.get('last_name'))
+
+
+def _patient_birthdate(m: Dict[str, Any]) -> Any:
+    return m.get('birthDate') or m.get('date_of_birth')
+
+
+def _patient_gender(m: Dict[str, Any]) -> Any:
+    return m.get('gender')
+
+
+def _patient_id(m: Dict[str, Any]) -> Any:
+    return m.get('id') or m.get('member_id')
+
+
+def _claim_icd10(c: Dict[str, Any]) -> str:
+    diag = c.get('diagnosis') or []
+    if diag and isinstance(diag, list):
+        first = diag[0] or {}
+        dcc = first.get('diagnosisCodeableConcept') or {}
+        coding = dcc.get('coding') or []
+        if coding and isinstance(coding, list):
+            return str((coding[0] or {}).get('code', ''))
+    return str(c.get('icd10_primary', ''))
+
+
+def _claim_npi(c: Dict[str, Any]) -> str:
+    provider_ref = str((c.get('provider') or {}).get('reference', ''))
+    if provider_ref.startswith('Practitioner/'):
+        return provider_ref.split('/', 1)[1]
+    return str(c.get('provider_npi', ''))
+
+
+def _claim_has_patient(c: Dict[str, Any]) -> bool:
+    patient_ref = str((c.get('patient') or {}).get('reference', ''))
+    return bool(patient_ref) or bool(c.get('member_id'))
+
+
+def _claim_date(c: Dict[str, Any]) -> Any:
+    bp = c.get('billablePeriod') or {}
+    return bp.get('start') or c.get('date_of_service')
+
+
+def _claim_amount(c: Dict[str, Any]) -> Any:
+    total = c.get('total') or {}
+    if isinstance(total, dict) and 'value' in total:
+        return total.get('value')
+    return c.get('claim_amount')
+
+
 def compute_compliance(
     members: List[Dict[str, Any]],
     eligibility: List[Dict[str, Any]],
@@ -39,32 +95,36 @@ def compute_compliance(
     total_claims = len(claims) or 1
     total_members = len(members) or 1
 
-    icd_pass = sum(1 for c in claims if check_icd10(str(c.get('icd10_primary', ''))))
+    icd_pass = sum(1 for c in claims if check_icd10(_claim_icd10(c)))
     icd_score = round(icd_pass / total_claims * 100, 1)
 
-    npi_pass = sum(1 for c in claims if check_npi(str(c.get('provider_npi', ''))))
+    npi_pass = sum(1 for c in claims if check_npi(_claim_npi(c)))
     npi_score = round(npi_pass / total_claims * 100, 1)
 
-    fhir_fields_claims = ['claim_id', 'member_id', 'provider_npi', 'icd10_primary', 'claim_amount', 'date_of_service']
-    fhir_fields_members = ['member_id', 'first_name', 'last_name', 'date_of_birth', 'gender']
-    claim_complete = sum(1 for c in claims if all(c.get(f) for f in fhir_fields_claims))
-    member_complete = sum(1 for m in members if all(m.get(f) for f in fhir_fields_members))
+    claim_complete = sum(1 for c in claims if _claim_has_patient(c) and check_icd10(_claim_icd10(c)) and _claim_amount(c) not in (None, ''))
+    member_complete = sum(1 for m in members if _patient_id(m) and _patient_name_present(m) and _patient_birthdate(m) and _patient_gender(m))
     fhir_score = round(((claim_complete / total_claims) + (member_complete / total_members)) / 2 * 100, 1)
 
-    hipaa_fields = ['first_name', 'last_name', 'date_of_birth']
-    hipaa_pass = sum(1 for m in members if all(m.get(f) for f in hipaa_fields))
+    hipaa_pass = sum(1 for m in members if _patient_name_present(m) and _patient_birthdate(m))
     hipaa_score = round(hipaa_pass / total_members * 100, 1)
 
-    date_pass = sum(1 for c in claims if check_date_iso(c.get('date_of_service')))
+    date_pass = sum(1 for c in claims if check_date_iso(_claim_date(c)))
     date_score = round(date_pass / total_claims * 100, 1)
 
-    gender_pass = sum(1 for m in members if check_gender(str(m.get('gender', ''))))
+    gender_pass = sum(1 for m in members if check_gender(str(_patient_gender(m))))
     gender_score = round(gender_pass / total_members * 100, 1)
 
-    uuid_pass = sum(1 for m in members if check_member_id_uuid(str(m.get('member_id', ''))))
+    uuid_pass = sum(1 for m in members if check_member_id_uuid(str(_patient_id(m))))
     uuid_score = round(uuid_pass / total_members * 100, 1)
 
-    amount_pass = sum(1 for c in claims if c.get('claim_amount') is not None and float(c.get('claim_amount', 0)) > 0)
+    amount_pass = 0
+    for c in claims:
+        amt = _claim_amount(c)
+        try:
+            if amt is not None and float(amt) > 0:
+                amount_pass += 1
+        except Exception:
+            pass
     amount_score = round(amount_pass / total_claims * 100, 1)
 
     overall = round(

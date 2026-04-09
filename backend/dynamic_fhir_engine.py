@@ -6,8 +6,9 @@ from difflib import SequenceMatcher
 from typing import Any, Dict, List, Tuple, Optional
 
 SAMPLE_LIMIT = 5
-AUTO_MAP_THRESHOLD = 0.90
-REVIEW_THRESHOLD = 0.60
+AUTO_MAP_THRESHOLD = 0.85
+REVIEW_THRESHOLD = 0.55
+IGNORE_SOURCE_COLUMNS = {'created_at', 'updated_at', 'dataset_id'}
 
 FHIR_RESOURCE_CATALOG: Dict[str, Dict[str, Any]] = {
     "Patient": {
@@ -210,12 +211,17 @@ def score_column_mapping(resource: str, column: Dict[str, Any], sample_rows: Lis
     for target, meta in resource_fields.items():
         alias_scores = []
         alias_hits = []
+        normalized_col = normalize_name(col_name)
         for alias in meta["aliases"]:
+            norm_alias = normalize_name(alias)
             sim = _similarity(col_name, alias)
             alias_scores.append(sim)
-            if alias in normalize_name(col_name):
+            if normalized_col == norm_alias:
                 alias_hits.append(alias)
-                alias_scores.append(min(1.0, sim + 0.18))
+                alias_scores.append(1.0)
+            elif alias in normalized_col or norm_alias in normalized_col:
+                alias_hits.append(alias)
+                alias_scores.append(min(1.0, sim + 0.25))
 
         name_score = max(alias_scores) if alias_scores else 0.0
         type_score = 0.0
@@ -230,7 +236,15 @@ def score_column_mapping(resource: str, column: Dict[str, Any], sample_rows: Lis
             type_score = 0.9
 
         pattern_score, pattern_reason = pattern_match_score(target, patterns)
-        confidence = round(min(0.99, name_score * 0.55 + type_score * 0.20 + pattern_score * 0.25), 2)
+        confidence = round(min(0.99, name_score * 0.70 + type_score * 0.15 + pattern_score * 0.15), 2)
+
+        exact_alias_match = any(normalized_col == normalize_name(alias) for alias in meta["aliases"])
+        strong_semantic_match = exact_alias_match or (name_score >= 0.95 and type_score >= 0.8)
+        if strong_semantic_match:
+            confidence = max(confidence, 0.9)
+        elif exact_alias_match and (pattern_score >= 0.5 or type_score >= 0.8):
+            confidence = max(confidence, 0.88)
+
         reasons = []
         if alias_hits:
             reasons.append(f"name matched aliases: {', '.join(alias_hits[:2])}")
@@ -290,6 +304,20 @@ def build_mapping_summary(schema_info: Dict[str, Any]) -> Dict[str, Any]:
         field_mappings = []
 
         for col in info["columns_raw"]:
+            if normalize_name(col["name"]) in IGNORE_SOURCE_COLUMNS:
+                mapping = {
+                    "source_column": col["name"],
+                    "target_field": None,
+                    "confidence": 0.0,
+                    "status": "ignored",
+                    "reason": "operational/source metadata field not mapped to FHIR",
+                    "candidates": [],
+                    "data_type": col["type"],
+                    "sample_values": [stringify(row.get(col["name"])) for row in info["sample_rows"][:3]],
+                }
+                field_mappings.append(mapping)
+                unmapped_fields.append({"table": table_name, "resource": resource, **mapping})
+                continue
             candidates = score_column_mapping(resource, col, info["sample_rows"])
             best = candidates[0] if candidates else None
             status = "ignored"

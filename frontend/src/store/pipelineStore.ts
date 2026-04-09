@@ -4,9 +4,9 @@ import {
  AgentName, AgentState, AgentStatus, AuditEntry,
  ApprovalGateData, PipelineStage, ReconciliationReport,
  ReasoningStep, SchemaDriftData, SchemaMapping, WsEvent,
- ComplianceReport, MigrationRun,
+ ComplianceReport, MigrationRun, ReviewItem,
 } from '../types/pipeline'
-import { startPipeline, approvePipeline, haltPipeline, confirmDrift } from '../api/client'
+import { startPipeline, approvePipeline, haltPipeline, confirmDrift, resolveReview } from '../api/client'
 
 const DEFAULT_AGENT = (name: AgentName): AgentState => ({
  name,
@@ -34,7 +34,9 @@ interface PipelineStore {
  logMessages: { message: string; level: string; run_id: string; timestamp: string }[]
  runs: MigrationRun[]
  migrationSummary: Record<string, unknown> | null
+ pendingReviews: ReviewItem[]
  handleWsEvent: (event: WsEvent) => void
+ resolveReviewItem: (payload: { table: string; source_column: string; decision: 'accept' | 'reject' | 'edit'; selected_target?: string }) => Promise<void>
  startPipeline: () => Promise<void>
  approvePipeline: () => Promise<void>
  haltPipeline: () => Promise<void>
@@ -65,6 +67,7 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
  logMessages: [],
  runs: [],
  migrationSummary: null,
+ pendingReviews: [],
  startTime: null,
  driftDrawerOpen: false,
  activeAgentTab: 'discovery',
@@ -142,6 +145,10 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
  }
  case 'SCHEMA_MAPPING_READY': {
  set({ schemaMapping: event.mapping as SchemaMapping })
+ break
+ }
+ case 'REVIEWS_UPDATED': {
+ set((s) => ({ pendingReviews: event.pending_reviews as ReviewItem[], schemaMapping: (event.schema_mapping as SchemaMapping) || s.schemaMapping }))
  break
  }
  case 'RECONCILIATION_COMPLETE': {
@@ -226,6 +233,10 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
  toast('Schema drift acknowledged — resuming', { icon: '' })
  },
 
+ resolveReviewItem: async (payload) => {
+ await resolveReview(payload)
+ },
+
  resetPipeline: async () => {
  await fetch('/api/pipeline/reset', { method: 'POST' })
  set((s) => ({
@@ -237,6 +248,7 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
  approvalGate: null,
  schemaDrift: null,
  schemaMapping: null,
+ pendingReviews: [],
  activeAgentTab: 'discovery',
  agents: (Object.fromEntries(
  Object.entries(s.agents).map(([k, v]) => [k, { ...v, reasoning: [], records_processed: 0, status: k === 'monitor' ? 'watching' : 'idle' as AgentStatus, last_action: '' }])

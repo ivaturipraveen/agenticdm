@@ -11,6 +11,7 @@ from agents.transformation_agent import transform_batch
 from agents.qa_agent import run_reconciliation
 from run_store import create_run, update_run_stage, complete_run, fail_run, save_agent_output
 import fhir_client
+from fhir_store import save_resources
 
 settings = get_settings()
 BATCH_SIZE = 100
@@ -145,6 +146,8 @@ async def run_pipeline() -> None:
                 fhir_samples.append(all_transformed_resources[table][0])
 
         total_transformed = sum(len(v) for v in all_transformed_resources.values())
+        await pipeline_state.set_pending_reviews(all_review_items)
+        await ws_manager.broadcast("REVIEWS_UPDATED", {"pending_reviews": pipeline_state.pending_reviews, "schema_mapping": pipeline_state.schema_mapping})
         await ws_manager.send_reasoning(
             "orchestration", f"Transform complete - {total_transformed:,} FHIR resources generated",
             f"Review items: {len(all_review_items)}, Validation failures: {len(all_validation_errors)}",
@@ -186,6 +189,13 @@ async def run_pipeline() -> None:
         update_run_stage(run_id, "validate")
         await ws_manager.send_reasoning("orchestration", "Stage 3: VALIDATE - checking generated FHIR resources",
                                          f"Failures: {len(all_validation_errors)}. Review queue: {len(all_review_items)}", "", run_id=run_id)
+
+        if pipeline_state.pending_reviews:
+            await ws_manager.send_reasoning("orchestration", "Waiting for review decisions",
+                                             f"{len(pipeline_state.pending_reviews)} field mapping review items require accept, reject, or edit", "", run_id=run_id)
+            await pipeline_state.review_event.wait()
+            await ws_manager.send_reasoning("orchestration", "Review decisions received",
+                                             "Continuing pipeline with confirmed mapping decisions", "", run_id=run_id)
 
         validation_passed = len(all_validation_errors) == 0
         await ws_manager.send_reasoning(
@@ -254,6 +264,7 @@ async def run_pipeline() -> None:
                 batch = resources[i:i + BATCH_SIZE]
                 result = await _retry(fhir_client.post_bundle, batch, resource_type,
                                       label=f"FHIR POST {resource_type}", run_id=run_id)
+                save_resources(run_id, ds_id, resource_type, batch)
                 loaded_total += result["count"]
                 bundle_samples[resource_type] = result.get("bundle_sample", [])
                 await _log(run_id, "orchestration", f"FHIR {resource_type} loaded", "success", result["count"],

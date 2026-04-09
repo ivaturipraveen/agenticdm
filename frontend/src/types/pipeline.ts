@@ -91,6 +91,20 @@ export interface MappingTableSummary {
  row_count: number
 }
 
+export interface ReviewItem {
+ table: string
+ record_index?: number
+ resource?: string
+ resource_type?: string
+ source_column: string
+ source_value?: string
+ target_field?: string | null
+ confidence: number
+ reason: string
+ review_decision?: 'accept' | 'reject' | 'edit'
+ fields?: Array<{ source_column: string; source_value: string; candidate_target?: string; confidence: number; reason: string }>
+}
+
 export interface SchemaMapping {
  schema: Record<string, {
  row_count: number
@@ -173,6 +187,7 @@ export type WsEvent =
  | { type: 'APPROVAL_GATE'; records_to_load: number; anomaly_count: number; success_rate: number; validation_passed: boolean; waiting_since: string }
  | { type: 'SCHEMA_DRIFT'; column_changes: ColumnChange[]; proposed_mapping: Record<string, string>; details: string }
  | { type: 'SCHEMA_MAPPING_READY'; mapping: SchemaMapping }
+ | { type: 'REVIEWS_UPDATED'; pending_reviews: ReviewItem[]; schema_mapping?: SchemaMapping }
  | { type: 'RECONCILIATION_COMPLETE'; report: ReconciliationReport }
  | { type: 'COMPLIANCE_REPORT'; compliance: ComplianceReport }
  | { type: 'LOG_MESSAGE'; message: string; level: string; run_id: string; timestamp: string }

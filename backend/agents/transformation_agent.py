@@ -81,12 +81,18 @@ async def transform_batch(
             transformed.append(resource)
 
         if review_trace:
-            review_items.append({
-                "table": table,
-                "record_index": idx,
-                "resource_type": resource_type,
-                "fields": review_trace,
-            })
+            for review_field in review_trace:
+                review_items.append({
+                    "table": table,
+                    "record_index": idx,
+                    "resource_type": resource_type,
+                    "source_column": review_field["source_column"],
+                    "source_value": review_field["source_value"],
+                    "target_field": review_field.get("candidate_target"),
+                    "confidence": review_field["confidence"],
+                    "reason": review_field["reason"],
+                    "fields": review_trace,
+                })
 
     stats = {
         "total": len(records),
@@ -118,6 +124,15 @@ async def transform_batch(
         len(transformed)
     )
 
+    deduped_reviews = []
+    seen = set()
+    for item in review_items:
+        key = (item.get("table"), item.get("source_column"), item.get("target_field"))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped_reviews.append(item)
+
     return {
         "resource_type": resource_type,
         "transformed_records": transformed,
@@ -125,5 +140,5 @@ async def transform_batch(
         "stats": stats,
         "trace_log": trace_log,
         "validation_errors": validation_errors,
-        "review_items": review_items,
+        "review_items": deduped_reviews,
     }
