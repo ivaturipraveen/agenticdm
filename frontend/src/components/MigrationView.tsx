@@ -234,16 +234,21 @@ function DiscoveryView() {
 
 function TransformationView() {
  const migrationSummary = usePipelineStore(s => s.migrationSummary) as any
+ const schemaMapping = usePipelineStore(s => s.schemaMapping)
+ const agents = usePipelineStore(s => s.agents)
  const pendingReviews = usePipelineStore(s => s.pendingReviews)
  const fhirSamples = migrationSummary?.agent_outputs?.fhir_samples || []
  const validationErrors = migrationSummary?.agent_outputs?.validation_errors || []
  const reviewItems = migrationSummary?.agent_outputs?.review_items || []
+ // Use live agent records_processed while run is active; fall back to summary after complete
+ const sourceRows = migrationSummary?.total_source ?? schemaMapping?.summary?.total_rows ?? agents.transformation.records_processed
+ const outputRows = migrationSummary?.total_loaded ?? agents.transformation.records_processed
  return (
  <div className="space-y-5">
  <div className="grid grid-cols-4 gap-4">
- <MetricCard label="Source rows processed" value={migrationSummary?.total_source ?? 0} />
- <MetricCard label="FHIR rows produced" value={migrationSummary?.total_loaded ?? 0} tone="text-violet-700" />
- <MetricCard label="Review items" value={reviewItems.length} tone="text-amber-700" />
+ <MetricCard label="Source rows processed" value={sourceRows || 0} />
+ <MetricCard label="FHIR rows produced" value={outputRows || 0} tone="text-violet-700" />
+ <MetricCard label="Review items" value={pendingReviews.length || reviewItems.length} tone="text-amber-700" />
  <MetricCard label="Validation issues" value={validationErrors.length} tone={validationErrors.length ? 'text-red-700' : 'text-emerald-700'} />
  </div>
  <Section title="What this agent is doing" subtitle="Transformation applies the mapping contract and converts source rows into FHIR-ready output.">
@@ -272,11 +277,17 @@ function TransformationView() {
 
 function OrchestrationView() {
  const migrationSummary = usePipelineStore(s => s.migrationSummary) as any
+ const schemaMapping = usePipelineStore(s => s.schemaMapping)
+ const agents = usePipelineStore(s => s.agents)
  const approvalGate = usePipelineStore(s => s.approvalGate)
  const stage = usePipelineStore(s => s.stage)
  const counts = migrationSummary?.agent_outputs?.resource_counts || {}
  const fhirSamples = migrationSummary?.agent_outputs?.fhir_samples || []
  const validationErrors = migrationSummary?.agent_outputs?.validation_errors || []
+ // Live counts: use approval gate data, or agent records, or schema total while loading
+ const liveReadyCount = approvalGate?.records_to_load
+ ?? (stage === 'LOAD' || stage === 'RECONCILE' || stage === 'COMPLETE' ? (migrationSummary?.total_loaded ?? agents.orchestration.records_processed ?? schemaMapping?.summary?.total_rows ?? 0) : (schemaMapping?.summary?.total_rows ?? 0))
+ const liveFhirUrl = (migrationSummary?.agent_outputs as any)?.fhir_url || 'http://localhost:8080/fhir'
  const steps = [
  { key: 'EXTRACT', label: 'Extract', desc: 'Collect source rows from the selected dataset.' },
  { key: 'TRANSFORM', label: 'Transform', desc: 'Receive converted FHIR-ready data from Agent 2.' },
@@ -290,10 +301,10 @@ function OrchestrationView() {
  return (
  <div className="space-y-5">
  <div className="grid grid-cols-4 gap-4">
- <MetricCard label="Records ready" value={approvalGate?.records_to_load ?? migrationSummary?.total_loaded ?? 0} />
+ <MetricCard label="Records in pipeline" value={liveReadyCount} />
  <MetricCard label="Validation issues" value={validationErrors.length} tone={validationErrors.length ? 'text-red-700' : 'text-emerald-700'} />
- <MetricCard label="Approval state" value={stage === 'AWAITING_APPROVAL' ? 'Waiting' : stage === 'LOAD' || stage === 'RECONCILE' || stage === 'COMPLETE' ? 'Approved' : 'Pending'} tone={stage === 'AWAITING_APPROVAL' ? 'text-amber-700' : 'text-emerald-700'} />
- <MetricCard label="Target batches" value={Object.keys(counts).length} tone="text-cyan-700" />
+ <MetricCard label="Approval state" value={stage === 'AWAITING_APPROVAL' ? 'Waiting for approval' : ['LOAD','RECONCILE','COMPLETE'].includes(stage) ? 'Approved — loading' : 'Pending'} tone={stage === 'AWAITING_APPROVAL' ? 'text-amber-700' : ['LOAD','RECONCILE','COMPLETE'].includes(stage) ? 'text-emerald-700' : 'text-slate-500'} />
+ <MetricCard label="Resource types" value={Object.keys(counts).length || 3} tone="text-cyan-700" />
  </div>
 
  <Section title="What this agent is doing" subtitle="Orchestration is the control tower for the run. It sequences stages, enforces validation, waits for approval, loads the target, and hands the result to QA.">
@@ -309,14 +320,27 @@ function OrchestrationView() {
  {/* FHIR endpoint */}
  <div className="rounded-2xl border border-cyan-200 bg-cyan-50 p-4 shadow-sm">
  <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">FHIR Target Endpoint</div>
- <div className="font-mono text-cyan-800 text-sm">
- {(migrationSummary?.agent_outputs as any)?.fhir_url || 'Configured via FHIR_BASE_URL'}
+ <div className="font-mono text-cyan-800 text-sm">{liveFhirUrl}</div>
+ <div className="flex items-center gap-2 mt-2">
+ <span className={clsx('w-2 h-2 rounded-full', ['LOAD','RECONCILE','COMPLETE'].includes(stage) ? 'bg-emerald-500' : 'bg-slate-300')} />
+ <span className="text-xs text-slate-600">{['LOAD','RECONCILE','COMPLETE'].includes(stage) ? 'Actively sending resources to this endpoint' : 'Will send resources here after approval'}</span>
  </div>
- <div className="text-xs text-slate-500 mt-1">Resources are sent to this endpoint in batches. Results are also stored in the local FHIR Registry.</div>
  </div>
 
- <Section title="Load summary by resource type" subtitle="How many FHIR resources were sent for each type.">
+ <Section title="Load summary" subtitle={Object.keys(counts).length > 0 ? 'Resources sent to FHIR endpoint by type.' : stage === 'LOAD' ? 'Loading in progress…' : 'Will populate after load completes.'}>
+ {Object.keys(counts).length > 0 ? (
  <div className="grid grid-cols-3 gap-4">{Object.entries(counts).map(([k, v]) => <MetricCard key={k} label={k} value={v as number} tone="text-cyan-700" />)}</div>
+ ) : stage === 'LOAD' ? (
+ <div className="rounded-2xl border border-cyan-200 bg-cyan-50 p-4 flex items-center gap-3">
+ <div className="w-5 h-5 border-2 border-cyan-300 border-t-cyan-600 rounded-full animate-spin shrink-0" />
+ <div>
+ <div className="text-sm font-semibold text-cyan-800">Loading to FHIR endpoint…</div>
+ <div className="text-xs text-cyan-600 mt-0.5">Sending Patient, Coverage and Claim resources in batches of 100</div>
+ </div>
+ </div>
+ ) : (
+ <div className="rounded-2xl border border-slate-200 bg-white p-4 text-sm text-slate-500">Load has not started yet. Approve the pipeline to begin.</div>
+ )}
  </Section>
 
  <Section title="Approval gate" subtitle="The pipeline pauses here and waits for human confirmation before sending data to FHIR.">
