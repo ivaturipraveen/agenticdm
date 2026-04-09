@@ -308,9 +308,17 @@ async def run_pipeline() -> None:
             loaded_total, len(all_anomalies), run_id=run_id,
         )
 
-        # COMPLIANCE
+        # COMPLIANCE — compute from stored FHIR resources for accuracy
         from compliance import compute_compliance
-        compliance = compute_compliance(transformed_members, transformed_eligibility, transformed_claims)
+        from fhir_store import list_resources as _list_fhir
+        fhir_patients = [r['resource'] for r in _list_fhir(run_id=run_id, resource_type='Patient', limit=5000)]
+        fhir_coverage = [r['resource'] for r in _list_fhir(run_id=run_id, resource_type='Coverage', limit=5000)]
+        fhir_claims_r = [r['resource'] for r in _list_fhir(run_id=run_id, resource_type='Claim', limit=5000)]
+        compliance = compute_compliance(
+            fhir_patients or transformed_members,
+            fhir_coverage or transformed_eligibility,
+            fhir_claims_r or transformed_claims,
+        )
         recon = pipeline_state.reconciliation or {}
 
         save_agent_output(

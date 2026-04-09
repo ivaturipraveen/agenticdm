@@ -474,6 +474,13 @@ def build_fhir_resource(resource_type: str, row: Dict[str, Any], field_mappings:
                 transformed_value = float(source_value)
             except Exception:
                 transformed_value = 0.0
+        # Normalize ICD-10: ensure dot present for codes >= 4 chars e.g. I100 -> I10.0
+        if resource_type == "Claim" and "diagnosis" in target_field and "code" in target_field:
+            code = stringify(transformed_value).strip().upper()
+            if code and len(code) >= 4 and '.' not in code:
+                transformed_value = f"{code[:3]}.{code[3:]}"
+            else:
+                transformed_value = code or stringify(source_value).strip().upper()
 
         set_fhir_path(resource, target_field, transformed_value)
         trace.append({

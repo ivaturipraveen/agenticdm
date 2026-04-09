@@ -5,12 +5,14 @@ Supports both source-style rows and generated FHIR resources.
 from typing import List, Dict, Any
 import re
 
-ICD10_RE = re.compile(r'^[A-Z]\d{2}\.\w{1,4}$')
+# Accepts: X99, X99.X, X99.XX, X99.XXX — both with and without decimal
+ICD10_RE = re.compile(r'^[A-Z]\d{2}(?:\.[A-Za-z0-9]{1,4})?$')
 NPI_RE   = re.compile(r'^\d{10}$')
 
 
 def check_icd10(code: str) -> bool:
-    return bool(ICD10_RE.match(str(code or '').strip()))
+    c = str(code or '').strip().upper()
+    return bool(ICD10_RE.match(c)) and len(c) >= 3
 
 
 def check_npi(npi: str) -> bool:
