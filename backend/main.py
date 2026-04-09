@@ -16,7 +16,7 @@ from pipeline_state import pipeline_state, Stage
 from websocket_manager import ws_manager
 from agents.orchestration_agent import run_pipeline
 from agents.monitor_agent import start_monitor
-from fhir_store import ensure_tables, list_resources, clear_resources, list_run_summaries, get_run_summary, list_records
+from fhir_store import ensure_tables, list_resources, clear_resources, list_run_summaries, get_run_summary, list_records, retry_failed_records
 from mock_admin import trigger_schema_drift, clear_schema_drift
 
 settings = get_settings()
@@ -297,6 +297,12 @@ async def get_fhir_run_summary(run_id: str):
 @app.get("/api/fhir/runs/{run_id}/records")
 async def get_fhir_run_records(run_id: str, resource_type: str | None = None, status: str | None = None, limit: int = 200):
     return JSONResponse(list_records(run_id, resource_type=resource_type, status=status, limit=limit))
+
+
+@app.post("/api/fhir/runs/{run_id}/retry")
+async def retry_run_failures(run_id: str):
+    retried = retry_failed_records(run_id)
+    return JSONResponse({"status": "ok", "retried": retried})
 
 
 @app.delete("/api/fhir/resources")

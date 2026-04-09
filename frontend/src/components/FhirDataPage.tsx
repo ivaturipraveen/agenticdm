@@ -157,15 +157,41 @@ function RecordDetail({ rec, onClose }: { rec: FhirRecord; onClose: () => void }
           </table>
         </div>
 
-        {/* Side-by-side: source vs FHIR JSON */}
-        <div className="grid grid-cols-2 gap-4">
-          <div className="rounded-2xl border border-slate-200 bg-white overflow-hidden shadow-sm">
-            <div className="px-4 py-3 border-b border-slate-200 bg-slate-50 text-xs font-bold text-slate-700">Source Row (PostgreSQL)</div>
-            <pre className="p-4 text-xs text-slate-700 overflow-x-auto whitespace-pre-wrap max-h-72">{JSON.stringify(rec.source, null, 2)}</pre>
-          </div>
-          <div className="rounded-2xl border border-blue-200 bg-blue-50 overflow-hidden shadow-sm">
-            <div className="px-4 py-3 border-b border-blue-200 bg-blue-50 text-xs font-bold text-blue-800">FHIR R4 Resource (Stored)</div>
-            <pre className="p-4 text-xs text-slate-700 overflow-x-auto whitespace-pre-wrap max-h-72">{JSON.stringify(rec.resource, null, 2)}</pre>
+        {/* 3-column: Source → Transformation → FHIR */}
+        <div>
+          <div className="text-sm font-bold text-slate-900 mb-1">Data Transformation Pipeline</div>
+          <div className="text-xs text-slate-500 mb-3">How the source row was transformed step-by-step into a stored FHIR resource.</div>
+          <div className="grid grid-cols-3 gap-4">
+            <div className="rounded-2xl border border-slate-200 bg-white overflow-hidden shadow-sm">
+              <div className="px-4 py-3 border-b border-slate-200 bg-slate-50">
+                <div className="flex items-center gap-2">
+                  <div className="w-6 h-6 rounded-full bg-slate-200 text-slate-700 text-xs font-bold flex items-center justify-center">1</div>
+                  <span className="text-xs font-bold text-slate-700">Source (PostgreSQL)</span>
+                </div>
+                <div className="text-[10px] text-slate-400 mt-1">Original relational row</div>
+              </div>
+              <pre className="p-3 text-xs text-slate-700 overflow-x-auto whitespace-pre-wrap max-h-56 leading-relaxed">{JSON.stringify(rec.source, null, 2)}</pre>
+            </div>
+            <div className="rounded-2xl border border-amber-200 bg-amber-50 overflow-hidden shadow-sm">
+              <div className="px-4 py-3 border-b border-amber-200 bg-amber-50">
+                <div className="flex items-center gap-2">
+                  <div className="w-6 h-6 rounded-full bg-amber-200 text-amber-800 text-xs font-bold flex items-center justify-center">2</div>
+                  <span className="text-xs font-bold text-amber-800">Mapped JSON</span>
+                </div>
+                <div className="text-[10px] text-amber-600 mt-1">After field mapping applied</div>
+              </div>
+              <pre className="p-3 text-xs text-slate-700 overflow-x-auto whitespace-pre-wrap max-h-56 leading-relaxed">{JSON.stringify(Object.fromEntries(checks.map(c => [c.field.split(' → ')[0], c.fhirVal])), null, 2)}</pre>
+            </div>
+            <div className="rounded-2xl border border-blue-200 bg-blue-50 overflow-hidden shadow-sm">
+              <div className="px-4 py-3 border-b border-blue-200 bg-blue-50">
+                <div className="flex items-center gap-2">
+                  <div className="w-6 h-6 rounded-full bg-blue-200 text-blue-800 text-xs font-bold flex items-center justify-center">3</div>
+                  <span className="text-xs font-bold text-blue-800">FHIR R4 Resource</span>
+                </div>
+                <div className="text-[10px] text-blue-600 mt-1">Final stored FHIR payload</div>
+              </div>
+              <pre className="p-3 text-xs text-slate-700 overflow-x-auto whitespace-pre-wrap max-h-56 leading-relaxed">{JSON.stringify(rec.resource, null, 2)}</pre>
+            </div>
           </div>
         </div>
 
@@ -187,15 +213,25 @@ function RunRecords({ summary, onBack }: { summary: RunSummary; onBack: () => vo
   const [filter, setFilter] = useState<'all' | 'success' | 'failed'>('all')
   const [typeFilter, setTypeFilter] = useState<string>('All')
   const [selected, setSelected] = useState<FhirRecord | null>(null)
+  const [retrying, setRetrying] = useState(false)
 
-  useEffect(() => {
+  const loadRecords = () => {
     setLoading(true)
     const q = new URLSearchParams()
     if (filter !== 'all') q.set('status', filter)
     if (typeFilter !== 'All') q.set('resource_type', typeFilter)
     q.set('limit', '500')
     fetch(`/api/fhir/runs/${summary.run_id}/records?${q}`).then(r => r.json()).then(d => { setRecords(d); setLoading(false) }).catch(() => setLoading(false))
-  }, [summary.run_id, filter, typeFilter])
+  }
+
+  const handleRetry = async () => {
+    setRetrying(true)
+    await fetch(`/api/fhir/runs/${summary.run_id}/retry`, { method: 'POST' })
+    setRetrying(false)
+    loadRecords()
+  }
+
+  useEffect(() => { loadRecords() }, [summary.run_id, filter, typeFilter])
 
   if (selected) return <RecordDetail rec={selected} onClose={() => setSelected(null)} />
 
@@ -220,6 +256,11 @@ function RunRecords({ summary, onBack }: { summary: RunSummary; onBack: () => vo
           <div className="text-slate-400 text-xs font-mono mt-0.5">
             Run #{summary.run_id.slice(-8).toUpperCase()} · {summary.fhir_endpoint || 'endpoint'}
           </div>
+          {summary.failed > 0 && (
+            <button onClick={handleRetry} disabled={retrying} className="mt-2 flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-amber-300 bg-amber-50 text-amber-700 text-xs font-semibold hover:bg-amber-100 disabled:opacity-50">
+              {retrying ? 'Retrying…' : `Retry ${summary.failed} failed records`}
+            </button>
+          )}
         </div>
         <div className="flex gap-4 text-center text-sm shrink-0">
           <div><div className="text-2xl font-bold font-mono text-slate-900">{summary.total}</div><div className="text-xs text-slate-400">total</div></div>
