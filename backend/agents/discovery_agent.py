@@ -37,7 +37,7 @@ async def run_discovery() -> Dict[str, Any]:
         cur.execute(
             "SELECT table_name FROM information_schema.tables "
             "WHERE table_schema='public' AND table_type='BASE TABLE' "
-            "AND table_name NOT IN ('migration_runs', 'run_logs', 'run_agent_outputs') "
+            "AND table_name NOT IN ('migration_runs', 'run_logs', 'run_agent_outputs', 'fhir_loaded_resources') "
             "ORDER BY table_name"
         )
         tables = [r[0] for r in cur.fetchall()]

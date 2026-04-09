@@ -55,6 +55,7 @@ const STAGES = [
 ]
 
 export default function PreMigrationView({ onStartRun }: { onStartRun?: () => void } = {}) {
+  const [starting, setStarting] = useState(false)
   const [db, setDb] = useState<DbPreview | null>(null)
   const [loading, setLoading] = useState(false)
   const selectedDatasetId = usePipelineStore(s => s.selectedDatasetId)
@@ -106,11 +107,15 @@ export default function PreMigrationView({ onStartRun }: { onStartRun?: () => vo
                   </div>
                 ) : (
                   <button
-                    onClick={async () => { await startFn(); onStartRun?.() }}
-                    disabled={loading || !db}
-                    className="px-8 py-3 bg-blue-600 hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed text-white font-bold rounded-2xl text-sm shadow-sm transition-all"
+                    onClick={async () => {
+                      if (starting) return
+                      setStarting(true)
+                      try { await startFn(); onStartRun?.() } catch(e) { console.error(e) } finally { setStarting(false) }
+                    }}
+                    disabled={loading || !db || starting}
+                    className="flex items-center gap-2 px-8 py-3 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold rounded-2xl text-sm shadow-sm transition-all"
                   >
-                    Start Migration
+                    {starting ? <><span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />Starting…</> : 'Start Migration'}
                   </button>
                 )}
               </div>

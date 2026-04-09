@@ -302,12 +302,25 @@ async def run_pipeline() -> None:
         await ws_manager.send_reasoning("orchestration", "Stage 6: RECONCILE - invoking Agent 4 for post-load QA",
                                          "Comparing source rows with generated resource counts and references", "", run_id=run_id)
 
-        source_members = all_source_rows.get(next((m['table'] for m in mapping_summary if m['resource'] == 'Patient'), ''), [])
-        source_eligibility = all_source_rows.get(next((m['table'] for m in mapping_summary if m['resource'] == 'Coverage'), ''), [])
-        source_claims = all_source_rows.get(next((m['table'] for m in mapping_summary if m['resource'] == 'Claim'), ''), [])
-        transformed_members = all_transformed_resources.get(next((m['table'] for m in mapping_summary if m['resource'] == 'Patient'), ''), [])
-        transformed_eligibility = all_transformed_resources.get(next((m['table'] for m in mapping_summary if m['resource'] == 'Coverage'), ''), [])
-        transformed_claims = all_transformed_resources.get(next((m['table'] for m in mapping_summary if m['resource'] == 'Claim'), ''), [])
+        # Collect all source rows and transformed resources across all tables
+        source_members = []
+        source_eligibility = []
+        source_claims = []
+        transformed_members = []
+        transformed_eligibility = []
+        transformed_claims = []
+        for m in mapping_summary:
+            rows = all_source_rows.get(m['table'], [])
+            trows = all_transformed_resources.get(m['table'], [])
+            if m['resource'] == 'Patient':
+                source_members.extend(rows); transformed_members.extend(trows)
+            elif m['resource'] == 'Coverage':
+                source_eligibility.extend(rows); transformed_eligibility.extend(trows)
+            elif m['resource'] == 'Claim':
+                source_claims.extend(rows); transformed_claims.extend(trows)
+            else:
+                # Unknown resource type - still add to counts for reconciliation accuracy
+                source_members.extend(rows); transformed_members.extend(trows)
 
         await run_reconciliation(
             source_members, source_eligibility, source_claims,

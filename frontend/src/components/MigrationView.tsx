@@ -138,17 +138,24 @@ function DiscoveryView() {
 
  {/* Role explanation */}
  <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
- <div className="text-sm font-bold text-slate-900 mb-1">What is this agent doing?</div>
- <div className="text-sm text-slate-600 leading-relaxed">
- The Discovery Agent reads every source table, inspects column names, data types, and sample values, then decides which FHIR resource type each table most likely represents.
- It assigns a <strong>confidence score</strong> to every field mapping. Fields with high confidence are auto-mapped. Fields with lower confidence are flagged for human review before the pipeline continues.
+ <div className="text-sm font-bold text-slate-900 mb-2">How Discovery works</div>
+ <div className="text-sm text-slate-600 leading-relaxed mb-3">
+ The Discovery Agent reads each source table, scores every column against FHIR field patterns, and assigns a confidence percentage. 
+ Fields with <span className="font-semibold text-emerald-700">&ge;85% confidence</span> are auto-mapped. 
+ Fields between <span className="font-semibold text-amber-700">55–84%</span> are shown for your review. 
+ Fields below 55% (e.g. <code>dataset_id</code>, <code>created_at</code>) are system/operational columns — not patient data — and are safely ignored.
+ </div>
+ <div className="grid grid-cols-3 gap-3 text-sm">
+ <div className="rounded-xl bg-emerald-50 border border-emerald-200 p-3"><div className="font-semibold text-emerald-700">Auto-mapped</div><div className="text-emerald-600 text-xs mt-1">High confidence — mapped automatically</div></div>
+ <div className="rounded-xl bg-amber-50 border border-amber-200 p-3"><div className="font-semibold text-amber-700">Needs review</div><div className="text-amber-600 text-xs mt-1">Uncertain mapping — you confirm once</div></div>
+ <div className="rounded-xl bg-slate-100 border border-slate-200 p-3"><div className="font-semibold text-slate-600">Ignored</div><div className="text-slate-500 text-xs mt-1">System metadata — not part of patient record</div></div>
  </div>
  </div>
 
- {/* Mapping results per table */}
- <Section title="Mapping Results" subtitle="For each source table, this shows the inferred FHIR resource and how every column was mapped.">
+ {/* Mapping results per table — filter out system tables */}
+ <Section title="Source Table Mapping" subtitle="How each medical source table was mapped to a FHIR resource type.">
  <div className="space-y-4">
- {schemaMapping.mapping_summary.map((table) => (
+ {schemaMapping.mapping_summary.filter(t => ['members','eligibility','claims'].includes(t.table)).map((table) => (
  <div key={table.table} className="rounded-2xl border border-slate-200 bg-white overflow-hidden shadow-sm">
  <div className="px-4 py-3 border-b border-slate-200 bg-slate-50 flex items-center justify-between">
  <div>
@@ -198,22 +205,27 @@ function DiscoveryView() {
 
  {/* Review queue */}
  {pendingReviews.length > 0 && (
- <Section title={`Review Queue — ${pendingReviews.length} field${pendingReviews.length > 1 ? 's' : ''} need confirmation`} subtitle="The pipeline is paused. Accept or reject each field mapping below to continue.">
- <div className="flex items-center justify-between rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 mb-3">
- <div className="text-sm text-amber-800">
- The pipeline is waiting. Each field below appears in multiple source rows — resolving it once applies to all of them.
+ <div className="rounded-2xl border-2 border-amber-300 bg-amber-50 overflow-hidden shadow-sm">
+ <div className="px-5 py-4 border-b border-amber-200">
+ <div className="flex items-center justify-between">
+ <div>
+ <div className="font-bold text-amber-900">{pendingReviews.length} field{pendingReviews.length > 1 ? 's' : ''} need your decision</div>
+ <div className="text-sm text-amber-700 mt-1">Pipeline is paused. Resolve each field below, then it will continue automatically. Each decision applies to all rows with that field.</div>
  </div>
  <button
  onClick={() => { pendingReviews.forEach(item => usePipelineStore.getState().resolveReviewItem({ table: item.table, source_column: item.source_column, decision: 'reject' })) }}
- className="ml-4 px-3 py-1.5 rounded-xl border border-amber-300 text-amber-800 bg-white hover:bg-amber-100 text-xs font-semibold shrink-0"
- >Reject all & continue</button>
+ className="ml-4 px-4 py-2 rounded-xl border border-amber-400 text-amber-900 bg-white hover:bg-amber-100 text-sm font-semibold shrink-0"
+ >Skip all & continue</button>
  </div>
- <div className="space-y-3">{pendingReviews.map((item, idx) => <ReviewCard key={`${item.table}-${item.source_column}-${idx}`} item={item} />)}</div>
- </Section>
+ </div>
+ <div className="p-4 space-y-3">
+ {pendingReviews.map((item, idx) => <ReviewCard key={`${item.table}-${item.source_column}-${idx}`} item={item} />)}
+ </div>
+ </div>
  )}
  {pendingReviews.length === 0 && schemaMapping.summary.requires_review_fields === 0 && (
  <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-700 shadow-sm">
- All fields were auto-mapped with high confidence. No review required — the pipeline will continue.
+ All fields were auto-mapped. No review required — the pipeline will continue.
  </div>
  )}
  </div>
