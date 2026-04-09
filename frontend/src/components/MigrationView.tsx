@@ -449,12 +449,26 @@ function MonitorView() {
  )
 }
 
+const STAGE_SUMMARY: Record<string, { done: string; next: string }> = {
+ EXTRACT: { done: 'Source data pulled from PostgreSQL', next: 'Applying FHIR field mapping to each row' },
+ TRANSFORM: { done: 'All rows converted to FHIR-ready format', next: 'Validating structure and awaiting approval' },
+ VALIDATE: { done: 'FHIR structure validated', next: 'Waiting for human approval before load' },
+ AWAITING_APPROVAL: { done: 'Approval gate open', next: 'Once approved, resources will be sent to FHIR endpoint' },
+ LOAD: { done: 'Resources posted to FHIR endpoint', next: 'QA Agent verifying source vs output counts' },
+ RECONCILE: { done: 'QA complete — integrity verified', next: 'Migration finished' },
+ COMPLETE: { done: 'Migration complete. All records loaded and verified.', next: '' },
+ HALTED: { done: 'Pipeline was stopped.', next: 'Return to Home to start a new run.' },
+}
+
 export default function MigrationView({ onGoHome }: { onGoHome?: () => void } = {}) {
  const activeTab = usePipelineStore((s) => s.activeAgentTab)
  const setActiveTab = usePipelineStore((s) => s.setActiveAgentTab)
  const stage = usePipelineStore((s) => s.stage)
  const resetFn = usePipelineStore((s) => s.resetPipeline)
  const agents = usePipelineStore((s) => s.agents)
+ const schemaMapping = usePipelineStore((s) => s.schemaMapping)
+ const reconciliation = usePipelineStore((s) => s.reconciliation)
+ const migrationSummary = usePipelineStore((s) => s.migrationSummary) as any
  const isDone = stage === 'COMPLETE' || stage === 'HALTED'
  const active = AGENTS.find(a => a.id === activeTab) || AGENTS[0]
  const activeState = agents[active.id]
@@ -471,37 +485,132 @@ export default function MigrationView({ onGoHome }: { onGoHome?: () => void } = 
  }
  }, [active.id])
 
+ // Build activity log: what has been confirmed at each stage
+ const stageOrder = ['EXTRACT','TRANSFORM','VALIDATE','AWAITING_APPROVAL','LOAD','RECONCILE','COMPLETE']
+ const currentIdx = stageOrder.indexOf(stage)
+ const completedStages = stageOrder.slice(0, currentIdx)
+ const stageSummary = STAGE_SUMMARY[stage]
+
+ // Per-step quick stats for the sidebar
+ const stepStats: Record<string, string> = {
+ discovery: schemaMapping ? `${schemaMapping.summary.total_rows.toLocaleString()} rows · ${schemaMapping.summary.auto_mapped_fields} fields mapped` : '',
+ transformation: migrationSummary?.total_loaded ? `${migrationSummary.total_loaded.toLocaleString()} FHIR records` : '',
+ orchestration: migrationSummary?.total_loaded ? `Loaded to endpoint` : '',
+ qa: reconciliation ? `${reconciliation.match_pct}% match rate` : '',
+ monitor: agents.monitor.status === 'watching' ? 'Watching for schema drift' : agents.monitor.status,
+ }
+
  return (
- <div className="flex flex-col h-full bg-slate-100">
- {isDone && <div className="flex items-center justify-between px-4 py-2.5 border-b border-slate-200 bg-white shrink-0"><div className={clsx('text-sm font-semibold', stage === 'COMPLETE' ? 'text-emerald-700' : 'text-red-700')}>{stage === 'COMPLETE' ? 'Run complete' : 'Pipeline halted'}</div><button onClick={() => { resetFn(); onGoHome?.() }} className="px-4 py-1.5 bg-blue-600 hover:bg-blue-500 text-white font-semibold text-sm rounded-lg transition-all">Back to Home</button></div>}
- <div className="flex flex-1 gap-0 p-4 min-h-0">
- <div className="w-80 shrink-0 border-r border-slate-200 pr-3 overflow-y-auto">
- <div className="text-[10px] text-slate-500 uppercase tracking-wider font-semibold px-2 pb-2">Agents</div>
+ <div className="flex flex-col h-full bg-slate-50">
+ <div className="flex flex-1 gap-0 p-4 min-h-0 overflow-hidden">
+ {/* Left sidebar */}
+ <div className="w-72 shrink-0 flex flex-col gap-3 pr-4 border-r border-slate-200 overflow-y-auto">
+ {/* Current stage card */}
+ <div className={clsx('rounded-2xl p-4 shadow-sm border', stage === 'COMPLETE' ? 'border-emerald-200 bg-emerald-50' : stage === 'HALTED' ? 'border-red-200 bg-red-50' : 'border-blue-200 bg-blue-50')}>
+ <div className={clsx('text-xs font-bold uppercase tracking-wider mb-1', stage === 'COMPLETE' ? 'text-emerald-600' : stage === 'HALTED' ? 'text-red-600' : 'text-blue-600')}>Current Stage</div>
+ <div className="text-slate-900 font-semibold">{stage === 'AWAITING_APPROVAL' ? 'Awaiting Approval' : stage.charAt(0) + stage.slice(1).toLowerCase()}</div>
+ {stageSummary && <div className="text-xs text-slate-600 mt-1">{stageSummary.done}</div>}
+ {stageSummary?.next && <div className="text-xs text-blue-600 mt-2 font-medium">Next: {stageSummary.next}</div>}
+ </div>
+
+ {/* Agents */}
+ <div className="text-[10px] text-slate-400 uppercase tracking-wider font-semibold px-1">Agents</div>
  <div className="space-y-2">
  {AGENTS.map(a => {
  const c = COLOR[a.color]
  const state = agents[a.id]
- return <button key={a.id} onClick={() => setActiveTab(a.id)} className={clsx('w-full text-left rounded-xl border px-3 py-3 transition-all shadow-sm', activeTab === a.id ? `${c.border} ${c.panel}` : 'border-slate-200 bg-white hover:border-slate-300')}><div className="flex items-center gap-3"><div className="w-9 h-9 rounded-full bg-slate-200 text-slate-800 text-sm font-bold flex items-center justify-center">{a.num}</div><div className="flex-1"><div className={clsx('text-sm font-semibold', activeTab === a.id ? c.text : 'text-slate-900')}>Agent {a.num} — {a.title}</div><div className="text-[11px] text-slate-500 mt-0.5">{a.subtitle}</div><div className="text-[10px] text-slate-500 mt-1">Status: {state.status}</div></div></div></button>
+ const stat = stepStats[a.id]
+ const statusDot = state.status === 'success' ? 'bg-emerald-500' : state.status === 'running' ? 'bg-blue-500 animate-pulse' : state.status === 'failed' ? 'bg-red-500' : 'bg-slate-300'
+ return (
+ <button key={a.id} onClick={() => setActiveTab(a.id)}
+ className={clsx('w-full text-left rounded-2xl border px-4 py-3.5 transition-all', activeTab === a.id ? `${c.border} ${c.panel} shadow-sm` : 'border-slate-200 bg-white hover:border-slate-300 hover:shadow-sm')}>
+ <div className="flex items-center gap-3">
+ <div className={clsx('w-9 h-9 rounded-full text-sm font-bold flex items-center justify-center shrink-0', activeTab === a.id ? `${c.panel} ${c.text}` : 'bg-slate-100 text-slate-500')}>{a.num}</div>
+ <div className="flex-1 min-w-0">
+ <div className="flex items-center gap-2">
+ <div className={clsx('text-sm font-semibold truncate', activeTab === a.id ? c.text : 'text-slate-800')}>{a.title}</div>
+ <span className={clsx('w-2 h-2 rounded-full shrink-0', statusDot)} />
+ </div>
+ {stat && <div className="text-[11px] text-slate-500 mt-0.5 truncate">{stat}</div>}
+ </div>
+ </div>
+ </button>
+ )
  })}
  </div>
  </div>
- <div className="flex-1 min-w-0 pl-4 overflow-hidden">
- <div className="h-full bg-white border border-slate-200 rounded-xl overflow-hidden flex flex-col shadow-sm">
- <div className={clsx('px-5 py-4 border-b border-slate-200 shrink-0', palette.soft)}>
- <div className="flex items-center justify-between gap-4">
+
+ {/* Main content area */}
+ <div className="flex-1 min-w-0 pl-4 overflow-hidden flex flex-col">
+ {/* Agent header */}
+ <div className={clsx('rounded-2xl border mb-3 px-5 py-4 shadow-sm', palette.border, palette.panel)}>
+ <div className="flex items-start justify-between">
  <div>
- <div className={clsx('text-sm font-semibold', palette.text)}>Agent {active.num}</div>
- <div className="text-slate-900 font-bold text-xl">{active.title}</div>
- <div className="text-slate-600 text-sm mt-1">{active.subtitle}</div>
+ <div className={clsx('text-xs font-bold uppercase tracking-wider', palette.text)}>Agent {active.num}</div>
+ <div className="text-slate-900 font-bold text-xl mt-0.5">{active.title}</div>
+ <div className="text-slate-500 text-sm mt-1">{active.subtitle}</div>
  </div>
- <div className="text-right">
- <div className="text-xs text-slate-500">Pipeline stage</div>
- <div className="text-slate-900 font-semibold">{stage}</div>
+ <div className="text-right shrink-0">
+ <div className={clsx('inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold',
+ activeState.status === 'success' ? 'bg-emerald-100 text-emerald-700' :
+ activeState.status === 'running' ? 'bg-blue-100 text-blue-700' :
+ activeState.status === 'failed' ? 'bg-red-100 text-red-700' :
+ 'bg-slate-100 text-slate-500')}>
+ {activeState.status === 'running' && <span className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse" />}
+ {activeState.status === 'success' && '✓'} {activeState.status.charAt(0).toUpperCase() + activeState.status.slice(1)}
+ </div>
+ {isDone && (
+ <button onClick={() => { resetFn(); onGoHome?.() }}
+ className="mt-2 block px-4 py-1.5 bg-blue-600 hover:bg-blue-500 text-white font-semibold text-xs rounded-xl transition-all">
+ Back to Home
+ </button>
+ )}
  </div>
  </div>
  </div>
- <div className="flex-1 overflow-y-auto p-5 space-y-5 bg-slate-50/50">{content}</div>
+
+ {/* Content */}
+ <div className="flex-1 overflow-y-auto space-y-5 pr-0.5">{content}</div>
+
+ {/* Activity footer: what happened + next step */}
+ {completedStages.length > 0 && !isDone && (
+ <div className="mt-3 rounded-2xl border border-slate-200 bg-white shadow-sm overflow-hidden shrink-0">
+ <div className="px-4 py-2.5 border-b border-slate-100 bg-slate-50 text-xs font-bold text-slate-600 uppercase tracking-wider">Activity — What has been confirmed so far</div>
+ <div className="divide-y divide-slate-100">
+ {completedStages.map(s => {
+ const sum = STAGE_SUMMARY[s]
+ if (!sum) return null
+ return (
+ <div key={s} className="flex items-center gap-3 px-4 py-2.5">
+ <span className="w-2 h-2 rounded-full bg-emerald-500 shrink-0" />
+ <div className="flex-1">
+ <span className="text-xs font-semibold text-slate-700">{s.charAt(0) + s.slice(1).toLowerCase().replace('_', ' ')}</span>
+ <span className="text-xs text-slate-500 ml-2">{sum.done}</span>
  </div>
+ <span className="text-[10px] text-emerald-600 font-semibold uppercase tracking-wide">Done</span>
+ </div>
+ )
+ })}
+ {stageSummary?.next && (
+ <div className="flex items-center gap-3 px-4 py-2.5 bg-blue-50">
+ <span className="w-2 h-2 rounded-full bg-blue-500 animate-pulse shrink-0" />
+ <span className="text-xs text-blue-700 font-medium">Next: {stageSummary.next}</span>
+ </div>
+ )}
+ </div>
+ </div>
+ )}
+
+ {isDone && (
+ <div className={clsx('mt-3 rounded-2xl border shadow-sm p-4 shrink-0', stage === 'COMPLETE' ? 'border-emerald-200 bg-emerald-50' : 'border-red-200 bg-red-50')}>
+ <div className={clsx('text-sm font-bold mb-1', stage === 'COMPLETE' ? 'text-emerald-800' : 'text-red-800')}>
+ {stage === 'COMPLETE' ? 'Migration complete' : 'Pipeline halted'}
+ </div>
+ <div className="text-xs text-slate-600">
+ {stageOrder.filter((_, i) => i < currentIdx).map(s => STAGE_SUMMARY[s]?.done).filter(Boolean).join(' → ')}
+ </div>
+ </div>
+ )}
  </div>
  </div>
  </div>
