@@ -264,7 +264,14 @@ async def run_pipeline() -> None:
                 batch = resources[i:i + BATCH_SIZE]
                 result = await _retry(fhir_client.post_bundle, batch, resource_type,
                                       label=f"FHIR POST {resource_type}", run_id=run_id)
-                save_resources(run_id, ds_id, resource_type, batch)
+                src_batch = list(all_source_rows.get(table, []))[i:i + BATCH_SIZE]
+                save_resources(
+                    run_id, ds_id, resource_type, batch,
+                    source_rows=src_batch,
+                    validation_errors=[e for e in all_validation_errors if e.get("table") == table],
+                    fhir_endpoint=settings.fhir_base_url,
+                    simulated=result.get("simulated", True),
+                )
                 loaded_total += result["count"]
                 bundle_samples[resource_type] = result.get("bundle_sample", [])
                 await _log(run_id, "orchestration", f"FHIR {resource_type} loaded", "success", result["count"],

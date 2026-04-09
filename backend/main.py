@@ -16,7 +16,7 @@ from pipeline_state import pipeline_state, Stage
 from websocket_manager import ws_manager
 from agents.orchestration_agent import run_pipeline
 from agents.monitor_agent import start_monitor
-from fhir_store import ensure_tables, list_resources, clear_resources
+from fhir_store import ensure_tables, list_resources, clear_resources, list_run_summaries, get_run_summary, list_records
 from mock_admin import trigger_schema_drift, clear_schema_drift
 
 settings = get_settings()
@@ -282,6 +282,21 @@ async def delete_runs():
 @app.get("/api/fhir/resources")
 async def get_fhir_resources(run_id: str | None = None, resource_type: str | None = None, limit: int = 100):
     return JSONResponse(list_resources(run_id=run_id, resource_type=resource_type, limit=limit))
+
+
+@app.get("/api/fhir/runs")
+async def get_fhir_runs():
+    return JSONResponse(list_run_summaries())
+
+
+@app.get("/api/fhir/runs/{run_id}/summary")
+async def get_fhir_run_summary(run_id: str):
+    return JSONResponse(get_run_summary(run_id))
+
+
+@app.get("/api/fhir/runs/{run_id}/records")
+async def get_fhir_run_records(run_id: str, resource_type: str | None = None, status: str | None = None, limit: int = 200):
+    return JSONResponse(list_records(run_id, resource_type=resource_type, status=status, limit=limit))
 
 
 @app.delete("/api/fhir/resources")
