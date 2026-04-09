@@ -233,8 +233,6 @@ function RunRecords({ summary, onBack }: { summary: RunSummary; onBack: () => vo
 
   useEffect(() => { loadRecords() }, [summary.run_id, filter, typeFilter])
 
-  if (selected) return <RecordDetail rec={selected} onClose={() => setSelected(null)} />
-
   const byType = useMemo(() => {
     const m: Record<string, number> = {}
     records.forEach(r => { m[r.resource_type] = (m[r.resource_type] || 0) + 1 })
@@ -281,8 +279,8 @@ function RunRecords({ summary, onBack }: { summary: RunSummary; onBack: () => vo
         ))}
       </div>
 
-      {/* Records list */}
-      <div className="flex-1 overflow-y-auto p-4">
+      {selected && <RecordDetail rec={selected} onClose={() => setSelected(null)} />}
+      {!selected && <div className="flex-1 overflow-y-auto p-4">
         {loading ? <div className="text-slate-400 p-8 text-center">Loading records…</div> : (
           <div className="rounded-2xl border border-slate-200 bg-white overflow-hidden shadow-sm">
             <table className="w-full text-sm">
@@ -312,7 +310,7 @@ function RunRecords({ summary, onBack }: { summary: RunSummary; onBack: () => vo
             {records.length === 0 && <div className="p-8 text-center text-slate-400">No records match the selected filters.</div>}
           </div>
         )}
-      </div>
+      </div>}
     </div>
   )
 }
@@ -336,9 +334,9 @@ export default function FhirDataPage() {
     load()
   }
 
-  if (selectedRun) return <RunRecords summary={selectedRun} onBack={() => setSelectedRun(null)} />
-
   const totals = runs.reduce((a, r) => ({ total: a.total + r.total, success: a.success + r.success, failed: a.failed + r.failed }), { total: 0, success: 0, failed: 0 })
+
+  if (selectedRun) return <RunRecords summary={selectedRun} onBack={() => setSelectedRun(null)} />
 
   return (
     <div className="flex flex-col h-full bg-slate-50">

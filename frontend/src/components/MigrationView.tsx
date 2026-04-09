@@ -111,7 +111,15 @@ function ReviewCard({ item }: { item: ReviewItem }) {
 
 function DiscoveryView() {
  const schemaMapping = usePipelineStore(s => s.schemaMapping)
- const pendingReviews = usePipelineStore(s => s.pendingReviews)
+ const allPendingReviews = usePipelineStore(s => s.pendingReviews)
+ // Deduplicate: show one review card per unique (table, source_column) pair
+ const seen = new Set<string>()
+ const pendingReviews = allPendingReviews.filter(r => {
+ const key = `${r.table}::${r.source_column}`
+ if (seen.has(key)) return false
+ seen.add(key)
+ return true
+ })
  if (!schemaMapping) return (
  <div className="p-8 flex flex-col items-center gap-3 text-slate-400">
  <div className="w-12 h-12 border-2 border-slate-300 border-t-blue-500 rounded-full animate-spin" />
@@ -190,9 +198,15 @@ function DiscoveryView() {
 
  {/* Review queue */}
  {pendingReviews.length > 0 && (
- <Section title={`Review Queue (${pendingReviews.length})`} subtitle="The pipeline is paused here. Accept, reject, or edit each mapping to continue.">
- <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 mb-3 text-sm text-amber-800">
- These {pendingReviews.length} field mapping{pendingReviews.length > 1 ? 's were' : ' was'} flagged because the system's confidence was below the threshold. Review and confirm each one to continue.
+ <Section title={`Review Queue — ${pendingReviews.length} field${pendingReviews.length > 1 ? 's' : ''} need confirmation`} subtitle="The pipeline is paused. Accept or reject each field mapping below to continue.">
+ <div className="flex items-center justify-between rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 mb-3">
+ <div className="text-sm text-amber-800">
+ The pipeline is waiting. Each field below appears in multiple source rows — resolving it once applies to all of them.
+ </div>
+ <button
+ onClick={() => { pendingReviews.forEach(item => usePipelineStore.getState().resolveReviewItem({ table: item.table, source_column: item.source_column, decision: 'reject' })) }}
+ className="ml-4 px-3 py-1.5 rounded-xl border border-amber-300 text-amber-800 bg-white hover:bg-amber-100 text-xs font-semibold shrink-0"
+ >Reject all & continue</button>
  </div>
  <div className="space-y-3">{pendingReviews.map((item, idx) => <ReviewCard key={`${item.table}-${item.source_column}-${idx}`} item={item} />)}</div>
  </Section>
@@ -230,7 +244,11 @@ function TransformationView() {
  <div className="grid grid-cols-2 gap-4">{fhirSamples.slice(0, 2).map((sample: unknown, idx: number) => <div key={idx} className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm"><div className="text-sm font-semibold text-slate-900 mb-2">Sample {idx + 1}</div><pre className="text-xs text-slate-700 whitespace-pre-wrap overflow-x-auto">{JSON.stringify(sample, null, 2)}</pre></div>)}</div>
  </Section>
  <Section title="Review-required items" subtitle="Mappings or conversions that still need an operator decision.">
- {pendingReviews.length === 0 ? <div className="rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-500 shadow-sm">No unresolved transformation review items.</div> : <div className="space-y-3">{pendingReviews.map((item, idx) => <ReviewCard key={`${item.table}-${item.source_column}-${idx}`} item={item} />)}</div>}
+ {(() => {
+ const seen2 = new Set<string>()
+ const deduped = pendingReviews.filter(r => { const k = `${r.table}::${r.source_column}`; if (seen2.has(k)) return false; seen2.add(k); return true })
+ return deduped.length === 0 ? <div className="rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-500 shadow-sm">No unresolved transformation review items.</div> : <div className="space-y-3">{deduped.map((item, idx) => <ReviewCard key={`${item.table}-${item.source_column}-${idx}`} item={item} />)}</div>
+ })()}
  </Section>
  <Section title="Validation results" subtitle="Rows that failed FHIR validation rules.">
  {validationErrors.length === 0 ? <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-700 shadow-sm">No validation failures found.</div> : <div className="space-y-3">{validationErrors.map((err: any, idx: number) => <div key={idx} className="rounded-xl border border-red-200 bg-red-50 p-4 shadow-sm"><div className="text-sm font-semibold text-slate-900">{err.table} row {err.record_index + 1}</div><div className="text-sm text-red-700 mt-2">{(err.errors || []).join(', ')}</div></div>)}</div>}
