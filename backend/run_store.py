@@ -5,14 +5,7 @@ from config import get_settings
 
 settings = get_settings()
 
-DATASET_META = {
-    "synthea_standard": "Synthea Standard Cohort",
-    "clean_cohort":     "Clean Reference Dataset",
-    "high_anomaly":     "High Anomaly Dataset",
-    "edge_cases":       "Edge Cases Dataset",
-    "medicare_sample":  "Medicare Sample Cohort",
-    "medicaid_complex": "Medicaid Complex Dataset",
-}
+from dataset_meta import DATASET_META
 
 
 def _conn():
@@ -28,7 +21,7 @@ def create_run(run_id: str, dataset_id: str) -> None:
               (run_id, dataset_id, dataset_name, started_at, status)
             VALUES (%s, %s, %s, NOW(), 'running')
             ON CONFLICT (run_id) DO NOTHING
-        """, (run_id, dataset_id, DATASET_META.get(dataset_id, dataset_id)))
+        """, (run_id, dataset_id, DATASET_META.get(dataset_id, {}).get("name", dataset_id)))
         conn.commit()
         cur.close()
         conn.close()

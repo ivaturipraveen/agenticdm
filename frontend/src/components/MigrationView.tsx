@@ -261,11 +261,7 @@ function TransformationView() {
  <div className="grid grid-cols-2 gap-4">{fhirSamples.slice(0, 2).map((sample: unknown, idx: number) => <div key={idx} className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm"><div className="text-sm font-semibold text-slate-900 mb-2">Sample {idx + 1}</div><pre className="text-xs text-slate-700 whitespace-pre-wrap overflow-x-auto">{JSON.stringify(sample, null, 2)}</pre></div>)}</div>
  </Section>
  <Section title="Review-required items" subtitle="Mappings or conversions that still need an operator decision.">
- {(() => {
- const seen2 = new Set<string>()
- const deduped = pendingReviews.filter(r => { const k = `${r.table}::${r.source_column}`; if (seen2.has(k)) return false; seen2.add(k); return true })
- return deduped.length === 0 ? <div className="rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-500 shadow-sm">No unresolved transformation review items.</div> : <div className="space-y-3">{deduped.map((item, idx) => <ReviewCard key={`${item.table}-${item.source_column}-${idx}`} item={item} />)}</div>
- })()}
+ {pendingReviews.length === 0 ? <div className="rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-500 shadow-sm">No unresolved transformation review items.</div> : <div className="space-y-3">{pendingReviews.map((item, idx) => <ReviewCard key={`${item.table}-${item.source_column}-${idx}`} item={item} />)}</div>}
  </Section>
  <Section title="Validation results" subtitle="Rows that failed FHIR validation rules.">
  {validationErrors.length === 0 ? <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-700 shadow-sm">No validation failures found.</div> : <div className="space-y-3">{validationErrors.map((err: any, idx: number) => <div key={idx} className="rounded-xl border border-red-200 bg-red-50 p-4 shadow-sm"><div className="text-sm font-semibold text-slate-900">{err.table} row {err.record_index + 1}</div><div className="text-sm text-red-700 mt-2">{(err.errors || []).join(', ')}</div></div>)}</div>}

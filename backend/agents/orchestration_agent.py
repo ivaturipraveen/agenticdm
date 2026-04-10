@@ -330,10 +330,10 @@ async def run_pipeline() -> None:
 
         # COMPLIANCE — compute from stored FHIR resources for accuracy
         from compliance import compute_compliance
-        from fhir_store import list_resources as _list_fhir
-        fhir_patients = [r['resource'] for r in _list_fhir(run_id=run_id, resource_type='Patient', limit=5000)]
-        fhir_coverage = [r['resource'] for r in _list_fhir(run_id=run_id, resource_type='Coverage', limit=5000)]
-        fhir_claims_r = [r['resource'] for r in _list_fhir(run_id=run_id, resource_type='Claim', limit=5000)]
+        from fhir_store import list_records as _list_fhir_raw
+        fhir_patients = [r['resource'] for r in _list_fhir_raw(run_id, resource_type='Patient', limit=5000)]
+        fhir_coverage = [r['resource'] for r in _list_fhir_raw(run_id, resource_type='Coverage', limit=5000)]
+        fhir_claims_r = [r['resource'] for r in _list_fhir_raw(run_id, resource_type='Claim', limit=5000)]
         compliance = compute_compliance(
             fhir_patients or transformed_members,
             fhir_coverage or transformed_eligibility,

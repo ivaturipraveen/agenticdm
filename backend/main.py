@@ -16,7 +16,7 @@ from pipeline_state import pipeline_state, Stage
 from websocket_manager import ws_manager
 from agents.orchestration_agent import run_pipeline
 from agents.monitor_agent import start_monitor
-from fhir_store import ensure_tables, list_resources, clear_resources, list_run_summaries, get_run_summary, list_records, retry_failed_records
+from fhir_store import ensure_tables, clear_resources, list_run_summaries, get_run_summary, list_records, retry_failed_records
 from mock_admin import trigger_schema_drift, clear_schema_drift
 
 settings = get_settings()
@@ -74,17 +74,7 @@ async def ws_endpoint(websocket: WebSocket):
         await ws_manager.disconnect(websocket)
 
 
-DATASET_META = {
-    "synthea_standard":  {"name": "Synthea Standard Cohort",  "description": "Balanced baseline dataset for standard migration runs.",   "badge": "Standard",  "color": "blue"   },
-    "clean_cohort":      {"name": "Clean Reference Dataset",  "description": "Clean reference data with minimal issues.",                "badge": "Clean",     "color": "emerald"},
-    "high_anomaly":      {"name": "High Anomaly Dataset",     "description": "Messier source data to show error handling.",              "badge": "Stress",    "color": "red"    },
-    "edge_cases":        {"name": "Edge Cases Dataset",       "description": "Boundary conditions and unusual source values.",           "badge": "Edge",      "color": "amber"  },
-    "medicare_sample":   {"name": "Medicare Sample Cohort",   "description": "Production-style Medicare-shaped sample.",               "badge": "Medicare",  "color": "blue"   },
-    "medicaid_complex":  {"name": "Medicaid Complex Dataset", "description": "Complex Medicaid-shaped source records.",                 "badge": "Medicaid",  "color": "red"    },
-    "tiny_clean":        {"name": "Tiny Clean Demo",          "description": "Small clean dataset for fast client demos.",              "badge": "Tiny",      "color": "emerald"},
-    "tiny_anomaly":      {"name": "Tiny Anomaly Demo",        "description": "Small dataset with review-worthy fields.",               "badge": "Tiny",      "color": "amber"  },
-    "tiny_edge":         {"name": "Tiny Edge Demo",           "description": "Small boundary-case dataset for explainability.",         "badge": "Tiny",      "color": "blue"   },
-}
+from dataset_meta import DATASET_META
 
 
 @app.get("/api/datasets")
@@ -281,7 +271,13 @@ async def delete_runs():
 
 @app.get("/api/fhir/resources")
 async def get_fhir_resources(run_id: str | None = None, resource_type: str | None = None, limit: int = 100):
-    return JSONResponse(list_resources(run_id=run_id, resource_type=resource_type, limit=limit))
+    # Use list_records for full data; return simplified shape for legacy compatibility
+    recs = list_records(run_id, resource_type=resource_type, limit=limit)
+    return JSONResponse([{
+        "run_id": r["run_id"], "dataset_id": r["dataset_id"],
+        "resource_type": r["resource_type"], "resource_id": r["resource_id"],
+        "resource": r["resource"], "loaded_at": r["loaded_at"]
+    } for r in recs])
 
 
 @app.get("/api/fhir/runs")

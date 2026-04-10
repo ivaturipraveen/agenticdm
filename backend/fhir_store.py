@@ -220,22 +220,6 @@ def list_records(
     } for r in rows]
 
 
-def list_resources(run_id: Optional[str] = None, resource_type: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
-    """Legacy compat — returns simpler format."""
-    conn = _conn()
-    cur = conn.cursor()
-    clauses, params = [], []
-    if run_id:
-        clauses.append("run_id=%s"); params.append(run_id)
-    if resource_type:
-        clauses.append("resource_type=%s"); params.append(resource_type)
-    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-    params.append(limit)
-    cur.execute(f"SELECT run_id, dataset_id, resource_type, resource_id, resource_json, loaded_at FROM fhir_loaded_resources {where} ORDER BY loaded_at DESC LIMIT %s", params)
-    rows = cur.fetchall()
-    cur.close(); conn.close()
-    return [{"run_id": r[0], "dataset_id": r[1], "resource_type": r[2], "resource_id": r[3], "resource": r[4], "loaded_at": r[5].isoformat() if r[5] else None} for r in rows]
-
 
 def clear_resources() -> None:
     conn = _conn()
