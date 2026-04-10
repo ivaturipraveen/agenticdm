@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { apiUrl } from '../api/client'
 import { usePipelineStore } from '../store/pipelineStore'
 import DatasetSelector from './DatasetSelector'
 
@@ -67,7 +68,7 @@ export default function PreMigrationView({ onStartRun }: { onStartRun?: () => vo
   useEffect(() => {
     setLoading(true)
     setDb(null)
-    fetch(`/api/datasets/${selectedDatasetId}/preview`)
+    fetch(apiUrl(`/api/datasets/${selectedDatasetId}/preview`))
       .then(r => r.json())
       .then(d => { setDb(d); setLoading(false) })
       .catch(() => setLoading(false))

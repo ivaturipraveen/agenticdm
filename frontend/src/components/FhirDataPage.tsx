@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
+import { apiUrl } from '../api/client'
 import clsx from 'clsx'
 
 interface RunSummary {
@@ -293,12 +294,12 @@ function RunRecords({ summary, onBack }: { summary: RunSummary; onBack: () => vo
     if (filter !== 'all') q.set('status', filter)
     if (typeFilter !== 'All') q.set('resource_type', typeFilter)
     q.set('limit', '500')
-    fetch(`/api/fhir/runs/${summary.run_id}/records?${q}`).then(r => r.json()).then(d => { setRecords(d); setLoading(false) }).catch(() => setLoading(false))
+    fetch(apiUrl(`/api/fhir/runs/${summary.run_id}/records?${q}`)).then(r => r.json()).then(d => { setRecords(d); setLoading(false) }).catch(() => setLoading(false))
   }
 
   const handleRetry = async () => {
     setRetrying(true)
-    await fetch(`/api/fhir/runs/${summary.run_id}/retry`, { method: 'POST' })
+    await fetch(apiUrl(`/api/fhir/runs/${summary.run_id}/retry`), { method: 'POST' })
     setRetrying(false)
     loadRecords()
   }
@@ -395,13 +396,13 @@ export default function FhirDataPage() {
 
   const load = () => {
     setLoading(true)
-    fetch('/api/fhir/runs').then(r => r.json()).then(d => { setRuns(Array.isArray(d) ? d : []); setLoading(false) }).catch(() => setLoading(false))
+    fetch(apiUrl('/api/fhir/runs')).then(r => r.json()).then(d => { setRuns(Array.isArray(d) ? d : []); setLoading(false) }).catch(() => setLoading(false))
   }
 
   useEffect(() => { load() }, [])
 
   const clearAll = async () => {
-    await fetch('/api/fhir/resources', { method: 'DELETE' })
+    await fetch(apiUrl('/api/fhir/resources'), { method: 'DELETE' })
     setSelectedRun(null)
     load()
   }

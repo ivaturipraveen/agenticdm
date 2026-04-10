@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { apiUrl } from '../api/client'
 import clsx from 'clsx'
 import { usePipelineStore } from '../store/pipelineStore'
 import { MigrationRun } from '../types/pipeline'
@@ -29,7 +30,7 @@ function RunRow({ run, onClick, onDelete }: { run: MigrationRun; onClick: () => 
 }
 
 async function deleteRun(runId: string) {
- await fetch(`/api/runs/${runId}`, { method: 'DELETE' })
+ await fetch(apiUrl(`/api/runs/${runId}`), { method: 'DELETE' })
 }
 
 export default function RunHistory() {
@@ -42,7 +43,7 @@ export default function RunHistory() {
  if (!confirm(`Delete run #${run.run_id.slice(-8).toUpperCase()} (${run.dataset_name})?`)) return
  await deleteRun(run.run_id)
  // Refresh runs from server
- const updated = await fetch('/api/runs').then(r => r.json())
+ const updated = await fetch(apiUrl('/api/runs')).then(r => r.json())
  usePipelineStore.setState({ runs: updated })
  }
 

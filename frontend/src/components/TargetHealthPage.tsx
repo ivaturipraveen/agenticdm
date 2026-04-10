@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { apiUrl } from '../api/client'
 
 export default function TargetHealthPage() {
   const [health, setHealth] = useState<any>(null)
@@ -6,7 +7,7 @@ export default function TargetHealthPage() {
 
   const load = () => {
     setLoading(true)
-    fetch('/api/target/health').then(r => r.json()).then(d => { setHealth(d); setLoading(false) }).catch(() => setLoading(false))
+    fetch(apiUrl('/api/target/health')).then(r => r.json()).then(d => { setHealth(d); setLoading(false) }).catch(() => setLoading(false))
   }
 
   useEffect(() => { load() }, [])

@@ -1,6 +1,11 @@
 import axios from 'axios'
 
-const API_BASE = import.meta.env.VITE_API_URL ?? ''
+export const API_BASE = import.meta.env.VITE_API_URL ?? ''
+
+/** Build a full URL for fetch() calls: apiUrl('/api/datasets') */
+export function apiUrl(path: string): string {
+  return `${API_BASE}${path}`
+}
 
 const client = axios.create({
  baseURL: `${API_BASE}/api`,
@@ -19,4 +24,4 @@ export const resolveReview = (payload: { table: string; source_column: string; d
 export const getAuditLog = () => client.get('/audit-log')
 export const getAgentStatus = () => client.get('/agents/status')
 export const getReconciliation = () => client.get('/reconciliation')
-export const exportPdf = () => window.open('/api/audit-log/export-pdf', '_blank')
+export const exportPdf = () => window.open(apiUrl('/api/audit-log/export-pdf'), '_blank')

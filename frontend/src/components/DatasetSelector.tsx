@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import clsx from 'clsx'
 import { usePipelineStore } from '../store/pipelineStore'
 import { DatasetInfo } from '../types/pipeline'
+import { apiUrl } from '../api/client'
 
 const COLOR_MAP: Record<string, { border: string; badge: string; bg: string; selectedBorder: string }> = {
   blue: { border: 'border-slate-200', badge: 'bg-blue-100 text-blue-700 border-blue-200', bg: 'bg-white', selectedBorder: 'border-blue-500' },
@@ -17,7 +18,7 @@ export default function DatasetSelector({ onSelect, selected }: Props) {
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    fetch('/api/datasets').then(r => r.json()).then(d => {
+    fetch(apiUrl('/api/datasets')).then(r => r.json()).then(d => {
       setDatasets((Array.isArray(d) ? d : []).filter(ds => !String(ds.id).startsWith('tiny_')))
       setLoading(false)
     })

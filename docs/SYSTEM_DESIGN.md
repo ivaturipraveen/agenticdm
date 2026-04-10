@@ -1,6 +1,6 @@
 # System Design — FHIR Migration Platform
 
-**Version:** 3.0 (Claude AI-powered mapping)
+**Version:** 3.0 (Claude AI-powered mapping)  
 **Last updated:** April 2026
 
 ---

@@ -6,7 +6,7 @@ import {
  ReasoningStep, SchemaDriftData, SchemaMapping, WsEvent,
  ComplianceReport, MigrationRun, ReviewItem,
 } from '../types/pipeline'
-import { startPipeline, approvePipeline, haltPipeline, confirmDrift, resolveReview } from '../api/client'
+import { startPipeline, approvePipeline, haltPipeline, confirmDrift, resolveReview, apiUrl } from '../api/client'
 
 const DEFAULT_AGENT = (name: AgentName): AgentState => ({
  name,
@@ -238,7 +238,7 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
  },
 
  resetPipeline: async () => {
- await fetch('/api/pipeline/reset', { method: 'POST' })
+ await fetch(apiUrl('/api/pipeline/reset'), { method: 'POST' })
  set((s) => ({
  stage: 'IDLE',
  runId: null,

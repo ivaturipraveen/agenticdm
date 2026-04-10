@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { apiUrl } from '../api/client'
 import clsx from 'clsx'
 import { MigrationRun } from '../types/pipeline'
 import DataView from './DataView'
@@ -209,7 +210,7 @@ export default function RunDetail({ run, onBack }: { run: MigrationRun; onBack: 
 
   useEffect(() => {
     setLoading(true)
-    fetch(`/api/runs/${run.run_id}/agents`).then(r => r.json()).then(a => {
+    fetch(apiUrl(`/api/runs/${run.run_id}/agents`)).then(r => r.json()).then(a => {
       setAgentOutputs(Array.isArray(a) ? a : [])
       setLoading(false)
     })

@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { apiUrl } from '../api/client'
 import clsx from 'clsx'
 
 interface ColDef { name: string; type: string }
@@ -44,7 +45,7 @@ export default function DataView({ runId, datasetName }: { runId: string; datase
 
  useEffect(() => {
  setLoading(true)
- fetch(`/api/runs/${runId}/data-view?table=${activeTable}&limit=15`).then(r => r.json()).then(d => { setData(d); setLoading(false) }).catch(() => setLoading(false))
+ fetch(apiUrl(`/api/runs/${runId}/data-view?table=${activeTable}&limit=15`)).then(r => r.json()).then(d => { setData(d); setLoading(false) }).catch(() => setLoading(false))
  }, [runId, activeTable])
 
  const info = TABLE_INFO[activeTable]
