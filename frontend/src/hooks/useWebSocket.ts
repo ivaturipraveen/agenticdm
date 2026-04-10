@@ -2,7 +2,10 @@ import { useEffect, useRef } from 'react'
 import { usePipelineStore } from '../store/pipelineStore'
 import { WsEvent } from '../types/pipeline'
 
-const WS_URL = `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/ws`
+const _apiBase = import.meta.env.VITE_API_URL ?? ''
+const WS_URL = _apiBase
+  ? _apiBase.replace(/^http/, 'ws') + '/ws'
+  : `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/ws`
 
 export function useWebSocket(): void {
  const handleWsEvent = usePipelineStore((s) => s.handleWsEvent)

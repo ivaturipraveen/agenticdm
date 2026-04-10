@@ -1,13 +1,15 @@
 import axios from 'axios'
 
+const API_BASE = import.meta.env.VITE_API_URL ?? ''
+
 const client = axios.create({
- baseURL: '/api',
+ baseURL: `${API_BASE}/api`,
  timeout: 30000,
 })
 
 export default client
 
-export const startPipeline = (datasetId: string = 'synthea_standard') => client.post(`/pipeline/start?dataset_id=${datasetId}`)
+export const startPipeline = (datasetId: string) => client.post(`/pipeline/start?dataset_id=${encodeURIComponent(datasetId)}`)
 export const approvePipeline = () => client.post('/pipeline/approve')
 export const haltPipeline = () => client.post('/pipeline/halt')
 export const confirmDrift = () => client.post('/pipeline/confirm-drift')
