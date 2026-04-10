@@ -65,17 +65,22 @@ async def run_discovery() -> Dict[str, Any]:
             ]
             col_names = [c[0] for c in columns]
 
-            if any(c[0] == 'dataset_id' for c in columns):
-                dataset_id = getattr(pipeline_state, 'current_dataset_id', 'synthea_standard')
+            dataset_id = getattr(pipeline_state, 'current_dataset_id', '') or ''
+            has_dataset_col = any(c[0] == 'dataset_id' for c in columns)
+            use_filter = has_dataset_col and dataset_id and dataset_id != 'default'
+
+            if use_filter:
                 cur.execute(f'SELECT COUNT(*) FROM "{table}" WHERE dataset_id=%s', (dataset_id,))
-                row_count = cur.fetchone()[0]
-                cur.execute(f'SELECT * FROM "{table}" WHERE dataset_id=%s LIMIT %s', (dataset_id, SAMPLE_LIMIT))
-                sample_rows_raw = cur.fetchall()
             else:
                 cur.execute(f'SELECT COUNT(*) FROM "{table}"')
-                row_count = cur.fetchone()[0]
+            count_row = cur.fetchone()
+            row_count = count_row[0] if count_row is not None else 0
+
+            if use_filter:
+                cur.execute(f'SELECT * FROM "{table}" WHERE dataset_id=%s LIMIT %s', (dataset_id, SAMPLE_LIMIT))
+            else:
                 cur.execute(f'SELECT * FROM "{table}" LIMIT %s', (SAMPLE_LIMIT,))
-                sample_rows_raw = cur.fetchall()
+            sample_rows_raw = cur.fetchall()
 
             sample_rows = [{k: _safe(v) for k, v in dict(zip(col_names, row)).items()} for row in sample_rows_raw]
             schema_info[table] = {
@@ -97,16 +102,26 @@ async def run_discovery() -> Dict[str, Any]:
             pipeline_state.update_agent("discovery", "running", f"Scanned {table}: {row_count:,} rows", row_count)
             await ws_manager.send_agent_status("discovery", "running", f"Scanned {table}: {row_count:,} rows", row_count)
 
-        mapping_bundle = build_mapping_summary(schema_info)
+        api_key = getattr(settings, 'anthropic_api_key', '')
+        use_ai = bool(api_key and api_key.strip() and api_key != "your-anthropic-api-key-here")
+        mapper_label = "Claude AI" if use_ai else "fuzzy keyword fallback"
+        await ws_manager.send_reasoning(
+            "discovery", f"Building FHIR mapping using: {mapper_label}",
+            "Claude Haiku selected for intelligent column inference" if use_ai
+            else "No ANTHROPIC_API_KEY set — using keyword alias + string similarity scoring",
+            "", run_id=run_id
+        )
+        mapping_bundle = build_mapping_summary(schema_info, anthropic_api_key=api_key)
 
         for item in mapping_bundle["mapping_summary"]:
             auto_count = sum(1 for f in item["fields"] if f["status"] == "auto_mapped")
             review_count = sum(1 for f in item["fields"] if f["status"] == "requires_review")
             ignored_count = sum(1 for f in item["fields"] if f["status"] == "ignored")
+            mapped_by = item.get("mapped_by", "fuzzy_fallback")
             await ws_manager.send_reasoning(
                 "discovery",
-                f"Inferred {item['table']} -> {item['resource']} (confidence {item['resource_confidence']})",
-                f"Auto-mapped: {auto_count}, review: {review_count}, ignored: {ignored_count}. Reasons: {', '.join(item['resource_reasoning'][:3])}",
+                f"[{mapped_by}] {item['table']} -> {item['resource']} (confidence {item['resource_confidence']})",
+                f"Auto-mapped: {auto_count}, review: {review_count}, ignored: {ignored_count}. {', '.join(item['resource_reasoning'][:3])}",
                 "", run_id=run_id
             )
 

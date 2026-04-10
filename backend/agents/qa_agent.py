@@ -1,6 +1,14 @@
-"""Agent 4 - QA / Reconciliation Agent"""
+"""
+Agent 4 - QA / Reconciliation Agent
+
+Dynamic post-load reconciliation. No hardcoded source column names.
+All comparisons are driven by the mapping contract established during discovery:
+  - Source row counts vs loaded FHIR resource counts
+  - Per-resource-type record integrity
+  - FHIR R4 required field completeness on loaded resources
+"""
 import hashlib
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from datetime import datetime, timezone
 from audit_log import log_entry_sync
 from websocket_manager import ws_manager
@@ -8,118 +16,197 @@ from pipeline_state import pipeline_state
 
 
 def _norm(v: Any) -> str:
-    """Normalize a value to a stable string for checksum comparison."""
-    if v is None: return ""
+    if v is None:
+        return ""
     s = str(v).strip()
-    # Numeric: normalize to float string
     try:
         return str(float(s))
     except (ValueError, TypeError):
         pass
-    # Date: take first 10 chars
-    if len(s) >= 10 and s[2:3] in ('-',) or (len(s) >= 10 and s[4] == '-'):
+    if len(s) >= 10 and s[4:5] == '-':
         return s[:10]
     return s.lower()
 
 
-def _checksum(records: List[Dict[str, Any]], field: str) -> str:
-    values = sorted([_norm(r.get(field)) for r in records])
-    return hashlib.md5("|".join(values).encode()).hexdigest()
+def _checksum_values(values: List[Any]) -> str:
+    return hashlib.md5("|".join(sorted(_norm(v) for v in values)).encode()).hexdigest()
 
 
-def _get_fhir_field(resource: Dict[str, Any], field: str) -> Any:
-    """Extract the corresponding FHIR value for a source field name."""
-    if field == 'member_id':
-        return resource.get('id') or ((resource.get('patient') or {}).get('reference') or '').replace('Patient/', '')
-    if field == 'claim_amount':
-        return (resource.get('total') or {}).get('value')
-    if field == 'date_of_service':
-        return (resource.get('billablePeriod') or {}).get('start')
-    return resource.get(field)
+def _extract_fhir_field(resource: Dict[str, Any], fhir_path: str) -> Any:
+    """
+    Navigate a FHIR resource using a dot-notation path.
+    e.g. 'total.value', 'billablePeriod.start', 'patient.reference'
+    """
+    parts = fhir_path.split('.')
+    cur: Any = resource
+    for part in parts:
+        if cur is None:
+            return None
+        import re
+        m = re.match(r'(.+)\[(\d+)\]$', part)
+        if m:
+            name, idx = m.group(1), int(m.group(2))
+            arr = cur.get(name) if isinstance(cur, dict) else None
+            cur = arr[idx] if isinstance(arr, list) and idx < len(arr) else None
+        else:
+            cur = cur.get(part) if isinstance(cur, dict) else None
+    return cur
 
 
-def _checksum_fhir(records: List[Dict[str, Any]], field: str) -> str:
-    values = sorted([_norm(_get_fhir_field(r, field)) for r in records])
-    return hashlib.md5("|".join(values).encode()).hexdigest()
+def _build_source_checksums(
+    source_rows: List[Dict[str, Any]],
+    field_mappings: List[Dict[str, Any]],
+) -> Dict[str, str]:
+    """
+    Build checksums of source values for each auto-mapped column.
+    Returns: { source_column → checksum_of_values }
+    """
+    result = {}
+    auto_mapped = [f for f in field_mappings if f.get("status") == "auto_mapped" and f.get("source_column")]
+    for mapping in auto_mapped:
+        col = mapping["source_column"]
+        values = [r.get(col) for r in source_rows]
+        result[col] = _checksum_values(values)
+    return result
+
+
+def _build_fhir_checksums(
+    fhir_resources: List[Dict[str, Any]],
+    field_mappings: List[Dict[str, Any]],
+) -> Dict[str, str]:
+    """
+    Build checksums of FHIR values for each auto-mapped target field.
+    Returns: { source_column → checksum_of_fhir_values }
+    """
+    result = {}
+    auto_mapped = [f for f in field_mappings if f.get("status") == "auto_mapped" and f.get("target_field")]
+    for mapping in auto_mapped:
+        col = mapping["source_column"]
+        # Strip resource type prefix to get navigable path
+        raw = str(mapping["target_field"])
+        fhir_path = raw.split('.', 1)[1] if '.' in raw else raw
+        values = [_extract_fhir_field(r, fhir_path) for r in fhir_resources]
+        result[col] = _checksum_values(values)
+    return result
+
+
+def _check_fhir_completeness(resources: List[Dict[str, Any]], resource_type: str) -> Dict[str, Any]:
+    """
+    Check FHIR R4 required field presence across all loaded resources of a given type.
+    Returns per-field pass rates without hardcoding source column names.
+    """
+    from dynamic_fhir_engine import validate_fhir_resource
+    if not resources:
+        return {"total": 0, "valid": 0, "violations": 0, "error_breakdown": {}}
+
+    total = len(resources)
+    violations = 0
+    error_breakdown: Dict[str, int] = {}
+
+    for r in resources:
+        errors = validate_fhir_resource(r)
+        if errors:
+            violations += 1
+            for e in errors:
+                error_breakdown[e] = error_breakdown.get(e, 0) + 1
+
+    return {
+        "total": total,
+        "valid": total - violations,
+        "violations": violations,
+        "violation_rate": round(violations / total * 100, 1) if total else 0,
+        "error_breakdown": error_breakdown,
+    }
 
 
 async def run_reconciliation(
-    source_members: List[Dict[str, Any]],
-    source_eligibility: List[Dict[str, Any]],
-    source_claims: List[Dict[str, Any]],
-    transformed_members: List[Dict[str, Any]],
-    transformed_eligibility: List[Dict[str, Any]],
-    transformed_claims: List[Dict[str, Any]],
+    # source_* and transformed_* are lists of (rows, resources) per resource type
+    # Passed as generic lists — not typed as members/claims/eligibility
+    all_source: Dict[str, List[Dict[str, Any]]],       # { table_name: [rows] }
+    all_transformed: Dict[str, List[Dict[str, Any]]],  # { table_name: [fhir_resources] }
+    mapping_summary: List[Dict[str, Any]],             # from pipeline_state.schema_mapping
     loaded_count: int,
     anomaly_count: int,
     run_id: str = "",
 ) -> Dict[str, Any]:
     pipeline_state.update_agent("qa", "running", "Starting post-load reconciliation")
     await ws_manager.send_agent_status("qa", "running", "Starting post-load reconciliation", 0)
+    await ws_manager.send_audit_entry(log_entry_sync("qa", "Post-load reconciliation started", "pending", loaded_count, run_id=run_id))
 
-    entry = log_entry_sync("qa", "Post-load reconciliation started", "pending", loaded_count, run_id=run_id)
-    await ws_manager.send_audit_entry(entry)
-
-    source_total = len(source_members) + len(source_eligibility) + len(source_claims)
+    source_total = sum(len(rows) for rows in all_source.values())
     target_total = loaded_count
 
-    src_member_id_cs = _checksum(source_members, "member_id")
-    # FHIR Patient stores ID as UUID — compare source member count instead
-    checksum_member_id = len(source_members) == len(transformed_members)
+    # --- Per-table checksum validation ---
+    checksum_results: Dict[str, Any] = {}
+    total_violations = 0
+    completeness_by_type: Dict[str, Any] = {}
 
-    src_claim_amt_cs = _checksum(source_claims, "claim_amount")
-    tgt_claim_amt_cs = _checksum_fhir(transformed_claims, "claim_amount")
-    checksum_claim_amount = src_claim_amt_cs == tgt_claim_amt_cs
+    for table_map in mapping_summary:
+        table = table_map["table"]
+        resource_type = table_map["resource"]
+        field_mappings = table_map.get("fields", [])
 
-    src_dos_cs = _checksum(source_claims, "date_of_service")
-    tgt_dos_cs = _checksum_fhir(transformed_claims, "date_of_service")
-    checksum_date_of_service = src_dos_cs == tgt_dos_cs
+        src_rows = all_source.get(table, [])
+        fhir_rows = all_transformed.get(table, [])
 
-    violations = 0
-    for claim in transformed_claims:
-        has_patient = bool((claim.get("patient") or {}).get("reference"))
-        has_icd10 = bool((claim.get("diagnosis") or [{}])[0].get("diagnosisCodeableConcept", {}).get("coding", [{}])[0].get("code"))
-        has_npi = bool((claim.get("provider") or {}).get("reference"))
-        if not (has_patient and has_icd10 and has_npi):
-            violations += 1
+        # Count-based integrity
+        count_match = len(src_rows) == len(fhir_rows)
+
+        # Value-level checksums for auto-mapped fields
+        src_checksums = _build_source_checksums(src_rows, field_mappings)
+        fhir_checksums = _build_fhir_checksums(fhir_rows, field_mappings)
+
+        field_checksum_results = {}
+        for col in src_checksums:
+            field_checksum_results[col] = src_checksums[col] == fhir_checksums.get(col, "")
+
+        # FHIR completeness check
+        completeness = _check_fhir_completeness(fhir_rows, resource_type)
+        total_violations += completeness["violations"]
+        completeness_by_type[resource_type] = completeness
+
+        checksum_results[table] = {
+            "resource_type": resource_type,
+            "source_count": len(src_rows),
+            "fhir_count": len(fhir_rows),
+            "count_match": count_match,
+            "field_checksums": field_checksum_results,
+            "fields_checked": len(field_checksum_results),
+            "fields_passing": sum(1 for v in field_checksum_results.values() if v),
+        }
 
     match_pct = round((min(source_total, target_total) / max(source_total, 1)) * 100, 1)
-    matched = target_total - anomaly_count
-    mismatched = anomaly_count
 
     report: Dict[str, Any] = {
         "source_count": source_total,
         "target_count": target_total,
         "match_pct": match_pct,
-        "matched": matched,
-        "mismatched": mismatched,
+        "matched": target_total - anomaly_count,
+        "mismatched": anomaly_count,
         "missing": max(0, source_total - target_total),
-        "violations": violations,
-        "checksum_member_id": checksum_member_id,
-        "checksum_claim_amount": checksum_claim_amount,
-        "checksum_date_of_service": checksum_date_of_service,
+        "violations": total_violations,
         "anomalies_quarantined": anomaly_count,
+        "checksum_results": checksum_results,
+        "completeness_by_type": completeness_by_type,
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
     pipeline_state.reconciliation = report
 
-    detail_str = (
-        f"Source: {source_total}, Target: {target_total}, Match: {match_pct}%, "
-        f"Violations: {violations}, "
-        f"Checksum member_id: {'PASS' if checksum_member_id else 'FAIL'}, "
-        f"Checksum claim_amount: {'PASS' if checksum_claim_amount else 'FAIL'}, "
-        f"Checksum date_of_service: {'PASS' if checksum_date_of_service else 'FAIL'}"
+    checksum_summary = "; ".join(
+        f"{t}: {v['fields_passing']}/{v['fields_checked']} fields pass checksum"
+        for t, v in checksum_results.items()
     )
-    result_entry = log_entry_sync("qa", "Reconciliation complete", "success", target_total,
-                                   detail_str, run_id=run_id)
-    await ws_manager.send_audit_entry(result_entry)
+    detail_str = (
+        f"Source: {source_total}, Loaded: {target_total}, Match: {match_pct}%, "
+        f"FHIR violations: {total_violations}. {checksum_summary}"
+    )
 
+    await ws_manager.send_audit_entry(log_entry_sync("qa", "Reconciliation complete", "success", target_total, detail_str, run_id=run_id))
     pipeline_state.update_agent("qa", "success", f"Reconciliation done - {match_pct}% match", target_total)
     await ws_manager.send_agent_status("qa", "success", f"Reconciliation complete: {match_pct}% match", target_total)
     await ws_manager.broadcast("RECONCILIATION_COMPLETE", {"report": report})
     await ws_manager.send_log_message(
-        f"QA complete - {match_pct}% match rate, {violations} business rule violations",
-        "info" if violations == 0 else "warning", run_id
+        f"QA complete - {match_pct}% match rate, {total_violations} FHIR violations",
+        "info" if total_violations == 0 else "warning", run_id
     )
-
     return report

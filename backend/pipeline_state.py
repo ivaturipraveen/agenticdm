@@ -1,4 +1,5 @@
 import asyncio
+import threading
 import uuid
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional
@@ -30,9 +31,10 @@ class PipelineState:
         self.drift_confirm_event: asyncio.Event = asyncio.Event()
         self.schema_mapping: Optional[Dict[str, Any]] = None
         self.reconciliation: Optional[Dict[str, Any]] = None
-        self.current_dataset_id: str = "synthea_standard"
+        self.current_dataset_id: str = ""
         self.pending_reviews: list[Dict[str, Any]] = []
         self._lock: asyncio.Lock = asyncio.Lock()
+        self._agent_lock: threading.Lock = threading.Lock()
 
         self.agent_statuses: Dict[str, Dict[str, Any]] = {
             "discovery":      {"status": "idle",     "last_action": "", "records_processed": 0, "last_active": None},
@@ -135,13 +137,14 @@ class PipelineState:
 
     def update_agent(self, agent: str, status: str, last_action: str = "", records_processed: int = 0) -> None:
         now = datetime.now(timezone.utc).isoformat()
-        if agent in self.agent_statuses:
-            self.agent_statuses[agent]["status"] = status
-            if last_action:
-                self.agent_statuses[agent]["last_action"] = last_action
-            if records_processed:
-                self.agent_statuses[agent]["records_processed"] += records_processed
-            self.agent_statuses[agent]["last_active"] = now
+        with self._agent_lock:
+            if agent in self.agent_statuses:
+                self.agent_statuses[agent]["status"] = status
+                if last_action:
+                    self.agent_statuses[agent]["last_action"] = last_action
+                if records_processed:
+                    self.agent_statuses[agent]["records_processed"] += records_processed
+                self.agent_statuses[agent]["last_active"] = now
 
     def to_dict(self) -> Dict[str, Any]:
         return {

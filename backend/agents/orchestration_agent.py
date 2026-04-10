@@ -11,7 +11,7 @@ from agents.transformation_agent import transform_batch
 from agents.qa_agent import run_reconciliation
 from run_store import create_run, update_run_stage, complete_run, fail_run, save_agent_output
 import fhir_client
-from fhir_store import save_resources
+from fhir_store import save_resources, log_endpoint_call
 
 settings = get_settings()
 BATCH_SIZE = 100
@@ -33,7 +33,7 @@ async def _retry(coro_fn, *args, label: str = "op", run_id: str = "", **kwargs):
             await asyncio.sleep(wait)
 
 
-def _fetch_all(table: str, dataset_id: str = "synthea_standard") -> List[Dict[str, Any]]:
+def _fetch_all(table: str, dataset_id: str = "") -> List[Dict[str, Any]]:
     conn = psycopg2.connect(settings.sync_database_url)
     cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
     cur.execute(
@@ -41,7 +41,7 @@ def _fetch_all(table: str, dataset_id: str = "synthea_standard") -> List[Dict[st
         (table,),
     )
     has_dataset = bool(cur.fetchone())
-    if has_dataset:
+    if has_dataset and dataset_id and dataset_id != "default":
         cur.execute(f'SELECT * FROM "{table}" WHERE dataset_id = %s', (dataset_id,))
     else:
         cur.execute(f'SELECT * FROM "{table}"')
@@ -51,7 +51,7 @@ def _fetch_all(table: str, dataset_id: str = "synthea_standard") -> List[Dict[st
     return rows
 
 
-async def _fetch_table(table: str, dataset_id: str = "synthea_standard") -> List[Dict[str, Any]]:
+async def _fetch_table(table: str, dataset_id: str = "") -> List[Dict[str, Any]]:
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, _fetch_all, table, dataset_id)
 
@@ -63,7 +63,7 @@ async def _log(run_id: str, agent: str, action: str, status: str, records: int =
 
 async def run_pipeline() -> None:
     run_id = await pipeline_state.start_run()
-    ds_id = getattr(pipeline_state, 'current_dataset_id', 'synthea_standard')
+    ds_id = getattr(pipeline_state, 'current_dataset_id', '') or ''
     create_run(run_id, ds_id)
 
     pipeline_state.update_agent("orchestration", "running", "Pipeline initiated")
@@ -269,13 +269,22 @@ async def run_pipeline() -> None:
                     run_id, ds_id, resource_type, batch,
                     source_rows=src_batch,
                     validation_errors=[e for e in all_validation_errors if e.get("table") == table],
-                    fhir_endpoint=settings.fhir_base_url,
-                    simulated=result.get("simulated", True),
+                )
+                log_endpoint_call(
+                    run_id=run_id,
+                    dataset_id=ds_id,
+                    resource_type=resource_type,
+                    endpoint_url=settings.fhir_base_url,
+                    http_status=result.get("http_status"),
+                    resource_count=result["count"],
+                    success=result.get("success", True),
+                    simulated=result.get("simulated", False),
+                    response_body=result.get("bundle_sample"),
                 )
                 loaded_total += result["count"]
                 bundle_samples[resource_type] = result.get("bundle_sample", [])
                 await _log(run_id, "orchestration", f"FHIR {resource_type} loaded", "success", result["count"],
-                           result.get("note") or f"Posted {result['count']} {resource_type} resources")
+                           f"Posted {result['count']} {resource_type} resources")
                 pipeline_state.update_agent("orchestration", "running", f"Loaded {resource_type}", result["count"])
                 await ws_manager.send_agent_status("orchestration", "running", f"Loaded {resource_type} batch", result["count"])
 
@@ -302,42 +311,28 @@ async def run_pipeline() -> None:
         await ws_manager.send_reasoning("orchestration", "Stage 6: RECONCILE - invoking Agent 4 for post-load QA",
                                          "Comparing source rows with generated resource counts and references", "", run_id=run_id)
 
-        # Collect all source rows and transformed resources across all tables
-        source_members = []
-        source_eligibility = []
-        source_claims = []
-        transformed_members = []
-        transformed_eligibility = []
-        transformed_claims = []
-        for m in mapping_summary:
-            rows = all_source_rows.get(m['table'], [])
-            trows = all_transformed_resources.get(m['table'], [])
-            if m['resource'] == 'Patient':
-                source_members.extend(rows); transformed_members.extend(trows)
-            elif m['resource'] == 'Coverage':
-                source_eligibility.extend(rows); transformed_eligibility.extend(trows)
-            elif m['resource'] == 'Claim':
-                source_claims.extend(rows); transformed_claims.extend(trows)
-            else:
-                # Unknown resource type - still add to counts for reconciliation accuracy
-                source_members.extend(rows); transformed_members.extend(trows)
-
+        # Pass all source/transformed data as table-keyed dicts — no hardcoded resource names
         await run_reconciliation(
-            source_members, source_eligibility, source_claims,
-            transformed_members, transformed_eligibility, transformed_claims,
-            loaded_total, len(all_anomalies), run_id=run_id,
+            all_source_rows,
+            all_transformed_resources,
+            mapping_summary,
+            loaded_total,
+            len(all_anomalies),
+            run_id=run_id,
         )
 
-        # COMPLIANCE — compute from stored FHIR resources for accuracy
+        # COMPLIANCE — compute from stored FHIR resources grouped by type
         from compliance import compute_compliance
         from fhir_store import list_records as _list_fhir_raw
-        fhir_patients = [r['resource'] for r in _list_fhir_raw(run_id, resource_type='Patient', limit=5000)]
-        fhir_coverage = [r['resource'] for r in _list_fhir_raw(run_id, resource_type='Coverage', limit=5000)]
-        fhir_claims_r = [r['resource'] for r in _list_fhir_raw(run_id, resource_type='Claim', limit=5000)]
+        by_type: Dict[str, List[Dict[str, Any]]] = {}
+        for m in mapping_summary:
+            rt = m['resource']
+            stored = [r['resource'] for r in _list_fhir_raw(run_id, resource_type=rt, limit=5000)]
+            by_type[rt] = stored or [r for r in all_transformed_resources.get(m['table'], [])]
         compliance = compute_compliance(
-            fhir_patients or transformed_members,
-            fhir_coverage or transformed_eligibility,
-            fhir_claims_r or transformed_claims,
+            by_type.get('Patient', []),
+            by_type.get('Coverage', []),
+            by_type.get('Claim', []),
         )
         recon = pipeline_state.reconciliation or {}
 

@@ -16,27 +16,21 @@ async def post_bundle(records: List[Dict[str, Any]], resource_type: str) -> Dict
     bundle = {"resourceType": "Bundle", "type": "transaction", "entry": entries}
 
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.post(f"{settings.fhir_base_url}", json=bundle)
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(settings.fhir_base_url, json=bundle)
             if response.status_code in (200, 201):
                 return {
                     "success": True,
                     "simulated": False,
+                    "http_status": response.status_code,
                     "count": len(entries),
                     "bundle_sample": bundle["entry"][:2],
                 }
-            return {
-                "success": True,
-                "simulated": True,
-                "count": len(entries),
-                "note": f"FHIR returned {response.status_code} - simulated",
-                "bundle_sample": bundle["entry"][:2],
-            }
-    except (httpx.ConnectError, httpx.TimeoutException, Exception):
-        return {
-            "success": True,
-            "simulated": True,
-            "count": len(entries),
-            "note": "FHIR server unreachable - load simulated for demo",
-            "bundle_sample": bundle["entry"][:2],
-        }
+            # Non-2xx from FHIR server — propagate as real error
+            raise RuntimeError(
+                f"FHIR server returned HTTP {response.status_code} for {resource_type}: {response.text[:200]}"
+            )
+    except (httpx.ConnectError, httpx.TimeoutException) as exc:
+        raise RuntimeError(
+            f"FHIR server unreachable at {settings.fhir_base_url}: {exc}"
+        ) from exc

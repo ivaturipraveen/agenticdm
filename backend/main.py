@@ -17,7 +17,6 @@ from websocket_manager import ws_manager
 from agents.orchestration_agent import run_pipeline
 from agents.monitor_agent import start_monitor
 from fhir_store import ensure_tables, clear_resources, list_run_summaries, get_run_summary, list_records, retry_failed_records
-from mock_admin import trigger_schema_drift, clear_schema_drift
 
 settings = get_settings()
 app = FastAPI(title="Brightcone Migration Platform", version="3.0.0")
@@ -74,32 +73,91 @@ async def ws_endpoint(websocket: WebSocket):
         await ws_manager.disconnect(websocket)
 
 
-from dataset_meta import DATASET_META
+_SYSTEM_TABLES = frozenset({
+    "migration_runs", "run_logs", "run_agent_outputs", "fhir_loaded_resources",
+})
+
+
+def _get_source_tables(cur) -> list:
+    """Return all public source tables, excluding system/metadata tables."""
+    cur.execute(
+        "SELECT table_name FROM information_schema.tables "
+        "WHERE table_schema='public' AND table_type='BASE TABLE' "
+        "ORDER BY table_name"
+    )
+    return [r[0] for r in cur.fetchall() if r[0] not in _SYSTEM_TABLES]
+
+
+def _tables_with_dataset_id(cur, tables: list) -> list:
+    """Return only those tables that have a dataset_id column."""
+    result = []
+    for t in tables:
+        cur.execute(
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_schema='public' AND table_name=%s AND column_name='dataset_id'",
+            (t,),
+        )
+        if cur.fetchone():
+            result.append(t)
+    return result
 
 
 @app.get("/api/datasets")
 async def get_datasets():
-    import psycopg2
+    import psycopg2, psycopg2.extras
     try:
         conn = psycopg2.connect(settings.sync_database_url)
         cur = conn.cursor()
-        cur.execute("SELECT DISTINCT dataset_id FROM members WHERE dataset_id IS NOT NULL UNION SELECT DISTINCT dataset_id FROM eligibility WHERE dataset_id IS NOT NULL UNION SELECT DISTINCT dataset_id FROM claims WHERE dataset_id IS NOT NULL")
-        dataset_ids = sorted(r[0] for r in cur.fetchall())
-        result = []
-        for ds_id in dataset_ids:
-            meta = DATASET_META.get(ds_id, {
-                "name": ds_id.replace('_', ' ').title(),
-                "description": "Dataset discovered from source database.",
+
+        source_tables = _get_source_tables(cur)
+        tables_with_ds = _tables_with_dataset_id(cur, source_tables)
+
+        if not tables_with_ds:
+            # No dataset_id columns — return a single synthetic entry with total counts
+            counts: dict = {}
+            for t in source_tables:
+                cur.execute(f'SELECT COUNT(*) FROM "{t}"')
+                row = cur.fetchone()
+                counts[t] = row[0] if row else 0
+            total = sum(counts.values())
+            cur.close()
+            conn.close()
+            return JSONResponse([{
+                "id": "default",
+                "name": "Default Dataset",
+                "description": "All source records (no dataset_id partitioning detected).",
                 "badge": "Dataset",
                 "color": "blue",
+                "total": total,
+                **counts,
+            }])
+
+        # Collect distinct dataset_ids across all tables that have the column
+        union_parts = " UNION ".join(
+            f'SELECT DISTINCT dataset_id FROM "{t}" WHERE dataset_id IS NOT NULL'
+            for t in tables_with_ds
+        )
+        cur.execute(union_parts)
+        dataset_ids = sorted(r[0] for r in cur.fetchall())
+
+        result = []
+        for ds_id in dataset_ids:
+            counts = {}
+            total = 0
+            for t in tables_with_ds:
+                cur.execute(f'SELECT COUNT(*) FROM "{t}" WHERE dataset_id=%s', (ds_id,))
+                row = cur.fetchone()
+                cnt = row[0] if row else 0
+                counts[t] = cnt
+                total += cnt
+            result.append({
+                "id": ds_id,
+                "name": ds_id.replace('_', ' ').title(),
+                "description": f"Dataset '{ds_id}' from source database.",
+                "total": total,
+                **counts,
             })
-            cur.execute("SELECT COUNT(*) FROM members WHERE dataset_id=%s", (ds_id,))
-            mc = cur.fetchone()[0]
-            cur.execute("SELECT COUNT(*) FROM eligibility WHERE dataset_id=%s", (ds_id,))
-            ec = cur.fetchone()[0]
-            cur.execute("SELECT COUNT(*) FROM claims WHERE dataset_id=%s", (ds_id,))
-            cc = cur.fetchone()[0]
-            result.append({**meta, "id": ds_id, "members": mc, "eligibility": ec, "claims": cc, "total": mc + ec + cc})
+
         cur.close()
         conn.close()
         return JSONResponse(result)
@@ -112,16 +170,42 @@ async def dataset_preview(dataset_id: str):
     import psycopg2, psycopg2.extras
     try:
         conn = psycopg2.connect(settings.sync_database_url)
+        plain_cur = conn.cursor()
+        source_tables = _get_source_tables(plain_cur)
+        plain_cur.close()
+
         cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
         result = {}
-        for table in ["members", "eligibility", "claims"]:
-            cur.execute(f'SELECT COUNT(*) FROM "{table}" WHERE dataset_id=%s', (dataset_id,))
-            count = cur.fetchone()[0]
-            cur.execute(f'SELECT * FROM "{table}" WHERE dataset_id=%s LIMIT 8', (dataset_id,))
+        for table in source_tables:
+            # Check whether this table has a dataset_id column
+            cur.execute(
+                "SELECT 1 FROM information_schema.columns "
+                "WHERE table_schema='public' AND table_name=%s AND column_name='dataset_id'",
+                (table,),
+            )
+            has_ds = bool(cur.fetchone())
+
+            if has_ds and dataset_id != "default":
+                cur.execute(f'SELECT COUNT(*) FROM "{table}" WHERE dataset_id=%s', (dataset_id,))
+            else:
+                cur.execute(f'SELECT COUNT(*) FROM "{table}"')
+            count_row = cur.fetchone()
+            count = count_row[0] if count_row else 0
+
+            if has_ds and dataset_id != "default":
+                cur.execute(f'SELECT * FROM "{table}" WHERE dataset_id=%s LIMIT 8', (dataset_id,))
+            else:
+                cur.execute(f'SELECT * FROM "{table}" LIMIT 8')
             rows = _clean_rows([dict(r) for r in cur.fetchall()])
-            cur.execute("SELECT column_name, data_type FROM information_schema.columns WHERE table_name=%s AND table_schema='public' ORDER BY ordinal_position", (table,))
+
+            cur.execute(
+                "SELECT column_name, data_type FROM information_schema.columns "
+                "WHERE table_name=%s AND table_schema='public' ORDER BY ordinal_position",
+                (table,),
+            )
             cols = [{"name": r[0], "type": r[1]} for r in cur.fetchall()]
             result[table] = {"count": count, "columns": cols, "sample": rows}
+
         cur.close()
         conn.close()
         return JSONResponse(result)
@@ -130,7 +214,7 @@ async def dataset_preview(dataset_id: str):
 
 
 @app.post("/api/pipeline/start")
-async def start_pipeline(background_tasks: BackgroundTasks, dataset_id: str = "synthea_standard"):
+async def start_pipeline(background_tasks: BackgroundTasks, dataset_id: str = "default"):
     if pipeline_state.current_stage not in (Stage.IDLE, Stage.COMPLETE, Stage.HALTED):
         return JSONResponse({"error": "Pipeline already running", "stage": pipeline_state.current_stage.value}, status_code=409)
     pipeline_state.current_dataset_id = dataset_id
@@ -318,16 +402,6 @@ async def target_health():
         return JSONResponse({"reachable": False, "status_code": None, "target": settings.fhir_base_url, "error": str(e)})
 
 
-@app.post('/api/mock/schema-drift/trigger')
-async def mock_drift_trigger():
-    result = trigger_schema_drift()
-    return JSONResponse(result)
-
-
-@app.post('/api/mock/schema-drift/clear')
-async def mock_drift_clear():
-    result = clear_schema_drift()
-    return JSONResponse(result)
 
 
 @app.get("/api/runs/{run_id}/logs")
@@ -343,23 +417,56 @@ async def get_run_agents(run_id: str):
 
 
 @app.get("/api/runs/{run_id}/data-view")
-async def get_run_data_view(run_id: str, table: str = "claims", limit: int = 20):
+async def get_run_data_view(run_id: str, table: str = "", limit: int = 20):
     import psycopg2, psycopg2.extras
     from agents.transformation_agent import transform_batch
     try:
         conn = psycopg2.connect(settings.sync_database_url)
+        plain_cur = conn.cursor()
+
+        # Resolve the table to inspect
+        resolved_table = table
+        if not resolved_table:
+            source_tables = _get_source_tables(plain_cur)
+            resolved_table = source_tables[0] if source_tables else None
+        plain_cur.close()
+
+        if not resolved_table:
+            conn.close()
+            return JSONResponse({"error": "No source tables found"}, status_code=404)
+
         cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
         cur.execute("SELECT dataset_id FROM migration_runs WHERE run_id=%s", (run_id,))
         row = cur.fetchone()
         if not row:
+            cur.close()
+            conn.close()
             return JSONResponse({"error": "Run not found"}, status_code=404)
         dataset_id = row["dataset_id"]
-        cur.execute(f'SELECT * FROM "{table}" WHERE dataset_id=%s LIMIT %s', (dataset_id, limit))
+
+        # Check if table has dataset_id column
+        cur.execute(
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_schema='public' AND table_name=%s AND column_name='dataset_id'",
+            (resolved_table,),
+        )
+        has_ds = bool(cur.fetchone())
+
+        if has_ds and dataset_id and dataset_id != "default":
+            cur.execute(f'SELECT * FROM "{resolved_table}" WHERE dataset_id=%s LIMIT %s', (dataset_id, limit))
+        else:
+            cur.execute(f'SELECT * FROM "{resolved_table}" LIMIT %s', (limit,))
         raw_rows = [dict(r) for r in cur.fetchall()]
-        cur.execute("SELECT column_name, data_type FROM information_schema.columns WHERE table_name=%s AND table_schema='public' ORDER BY ordinal_position", (table,))
+
+        cur.execute(
+            "SELECT column_name, data_type FROM information_schema.columns "
+            "WHERE table_name=%s AND table_schema='public' ORDER BY ordinal_position",
+            (resolved_table,),
+        )
         columns = [{"name": r[0], "type": r[1]} for r in cur.fetchall()]
         cur.close()
         conn.close()
+        table = resolved_table
 
         source_rows = _clean_rows(raw_rows)
         mapping = pipeline_state.schema_mapping.get("mapping_summary", []) if pipeline_state.schema_mapping else []

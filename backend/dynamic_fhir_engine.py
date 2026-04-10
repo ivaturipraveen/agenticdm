@@ -1,89 +1,45 @@
+"""
+FHIR Transformation Engine — pure, schema-driven, no hardcoded field names.
+
+Responsibilities:
+  - build_mapping_summary(): delegates to Claude AI for column→FHIR mapping.
+    Falls back to a lightweight structural inference when Claude is unavailable.
+  - build_fhir_resource(): deterministic row→FHIR JSON conversion using the
+    mapping contract produced above. No field names, aliases or patterns
+    are hardcoded here.
+  - apply_resource_defaults(): fills in FHIR R4 required fields that had no
+    source column (e.g. Coverage.payor, Claim.insurer).
+  - validate_fhir_resource(): structural FHIR R4 validation.
+"""
+
 import re
 import uuid
 import decimal
 import datetime
-from difflib import SequenceMatcher
 from typing import Any, Dict, List, Tuple, Optional
 
-SAMPLE_LIMIT = 5
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+SAMPLE_LIMIT = 10
 AUTO_MAP_THRESHOLD = 0.85
 REVIEW_THRESHOLD = 0.55
-IGNORE_SOURCE_COLUMNS = {'created_at', 'updated_at', 'dataset_id'}
 
-FHIR_RESOURCE_CATALOG: Dict[str, Dict[str, Any]] = {
-    "Patient": {
-        "hints": ["member", "patient", "person", "demographic", "subscriber", "beneficiary"],
-        "fields": {
-            "id": {"aliases": ["id", "member_id", "patient_id", "person_id"], "types": ["text", "varchar", "uuid", "int", "bigint"]},
-            "identifier[0].value": {"aliases": ["member_id", "subscriber_id", "identifier", "person_number"], "types": ["text", "varchar", "uuid", "int", "bigint"]},
-            "name[0].given[0]": {"aliases": ["first_name", "given_name", "fname", "forename"], "types": ["text", "varchar"]},
-            "name[0].family": {"aliases": ["last_name", "family_name", "lname", "surname"], "types": ["text", "varchar"]},
-            "birthDate": {"aliases": ["dob", "date_of_birth", "birth_date"], "types": ["date", "timestamp", "text", "varchar"]},
-            "gender": {"aliases": ["gender", "sex"], "types": ["text", "varchar"]},
-            "telecom[phone].value": {"aliases": ["phone", "phone_number", "mobile", "cell"], "types": ["text", "varchar"]},
-            "telecom[email].value": {"aliases": ["email", "email_address"], "types": ["text", "varchar"]},
-            "address[0].line[0]": {"aliases": ["address", "address_line1", "street", "street_address"], "types": ["text", "varchar"]},
-            "address[0].city": {"aliases": ["city", "town"], "types": ["text", "varchar"]},
-            "address[0].state": {"aliases": ["state", "province"], "types": ["text", "varchar"]},
-            "address[0].postalCode": {"aliases": ["zip", "zip_code", "postal_code", "postcode"], "types": ["text", "varchar"]},
-        },
-    },
-    "Coverage": {
-        "hints": ["eligibility", "coverage", "insurance", "plan", "payer", "benefit"],
-        "fields": {
-            "id": {"aliases": ["eligibility_id", "coverage_id", "insurance_id", "id"], "types": ["text", "varchar", "uuid", "int", "bigint"]},
-            "beneficiary.reference": {"aliases": ["member_id", "patient_id", "beneficiary_id", "subscriber_id"], "types": ["text", "varchar", "uuid", "int", "bigint"]},
-            "status": {"aliases": ["status", "coverage_status"], "types": ["text", "varchar"]},
-            "class[0].value": {"aliases": ["plan_id", "plan_code", "policy_id"], "types": ["text", "varchar"]},
-            "class[0].name": {"aliases": ["plan_name", "plan", "product_name"], "types": ["text", "varchar"]},
-            "period.start": {"aliases": ["effective_date", "start_date", "coverage_start"], "types": ["date", "timestamp", "text", "varchar"]},
-            "period.end": {"aliases": ["termination_date", "end_date", "coverage_end"], "types": ["date", "timestamp", "text", "varchar"]},
-            "type.text": {"aliases": ["coverage_type", "type", "line_of_business"], "types": ["text", "varchar"]},
-            "payor[0].identifier.value": {"aliases": ["payer_id", "carrier_id", "insurer_id"], "types": ["text", "varchar", "int", "bigint"]},
-            "subscriberId": {"aliases": ["subscriber_id", "member_number", "subscriber_number"], "types": ["text", "varchar"]},
-            "grouping.group": {"aliases": ["group_number", "group_id", "employer_group"], "types": ["text", "varchar"]},
-        },
-    },
-    "Claim": {
-        "hints": ["claim", "billing", "encounter", "diagnosis", "procedure", "adjudication"],
-        "fields": {
-            "id": {"aliases": ["claim_id", "encounter_id", "bill_id", "id"], "types": ["text", "varchar", "uuid", "int", "bigint"]},
-            "patient.reference": {"aliases": ["member_id", "patient_id", "beneficiary_id"], "types": ["text", "varchar", "uuid", "int", "bigint"]},
-            "provider.reference": {"aliases": ["provider_npi", "provider_id", "billing_provider", "servicing_provider"], "types": ["text", "varchar", "int", "bigint"]},
-            "provider.display": {"aliases": ["provider_name", "facility_name", "clinic_name"], "types": ["text", "varchar"]},
-            "created": {"aliases": ["claim_date", "created_at", "submitted_at", "service_date"], "types": ["date", "timestamp", "text", "varchar"]},
-            "billablePeriod.start": {"aliases": ["date_of_service", "service_date", "from_date"], "types": ["date", "timestamp", "text", "varchar"]},
-            "billablePeriod.end": {"aliases": ["date_of_service", "through_date", "to_date"], "types": ["date", "timestamp", "text", "varchar"]},
-            "diagnosis[0].diagnosisCodeableConcept.coding[0].code": {"aliases": ["icd10_primary", "diagnosis_code", "primary_diagnosis", "dx_code"], "types": ["text", "varchar"]},
-            "diagnosis[1].diagnosisCodeableConcept.coding[0].code": {"aliases": ["icd10_secondary", "secondary_diagnosis", "dx2_code"], "types": ["text", "varchar"]},
-            "diagnosis[0].diagnosisCodeableConcept.coding[0].display": {"aliases": ["diagnosis_description", "diagnosis_desc", "dx_description"], "types": ["text", "varchar"]},
-            "procedure[0].procedureCodeableConcept.coding[0].code": {"aliases": ["procedure_code", "cpt_code", "hcpcs_code"], "types": ["text", "varchar"]},
-            "total.value": {"aliases": ["claim_amount", "billed_amount", "amount", "total_amount"], "types": ["numeric", "decimal", "double precision", "real", "int", "bigint"]},
-            "payment.amount.value": {"aliases": ["paid_amount", "allowed_amount", "payment_amount"], "types": ["numeric", "decimal", "double precision", "real", "int", "bigint"]},
-            "status": {"aliases": ["claim_status", "status"], "types": ["text", "varchar"]},
-            "facility.identifier.value": {"aliases": ["place_of_service", "facility_code", "pos"], "types": ["text", "varchar", "int"]},
-        },
-    },
-}
+# Columns that are purely operational/ETL metadata — never mapped to FHIR.
+# This list intentionally stays small: exact internal names only.
+OPERATIONAL_COLUMNS = frozenset({
+    "created_at", "updated_at", "dataset_id", "deleted_at",
+    "modified_at", "inserted_at", "load_ts", "etl_ts", "row_hash",
+})
 
-RESOURCE_LINK_HINTS = {
-    "Patient": ["member", "patient", "person", "first_name", "last_name", "dob", "gender"],
-    "Coverage": ["coverage", "eligibility", "payer", "plan", "effective", "termination", "subscriber"],
-    "Claim": ["claim", "diagnosis", "procedure", "provider", "service", "amount", "billing"],
-}
-
-ICD10_RE = re.compile(r'^[A-Z]\d{2}(?:\.\w{1,4})?$')
-PHONE_RE = re.compile(r'\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}')
-EMAIL_RE = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
-ZIP_RE = re.compile(r'^\d{5}(?:-\d{4})?$')
 DATE_RE = re.compile(r'^\d{4}-\d{2}-\d{2}')
-NPI_RE = re.compile(r'^\d{10}$')
 UUID_RE = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.I)
+_VALID_GENDERS = {"male", "female", "other", "unknown"}
 
 
-def normalize_name(value: str) -> str:
-    return re.sub(r'[^a-z0-9]+', '_', str(value or '').strip().lower()).strip('_')
-
+# ---------------------------------------------------------------------------
+# Value utilities — generic, no field-name assumptions
+# ---------------------------------------------------------------------------
 
 def stringify(value: Any) -> str:
     if value is None:
@@ -95,305 +51,6 @@ def stringify(value: Any) -> str:
     return str(value)
 
 
-def _similarity(a: str, b: str) -> float:
-    return SequenceMatcher(None, normalize_name(a), normalize_name(b)).ratio()
-
-
-def detect_value_patterns(samples: List[Any]) -> Dict[str, float]:
-    vals = [stringify(v).strip() for v in samples if stringify(v).strip()]
-    if not vals:
-        return {}
-    n = len(vals)
-    return {
-        "date": sum(1 for v in vals if DATE_RE.match(v)) / n,
-        "email": sum(1 for v in vals if EMAIL_RE.match(v)) / n,
-        "phone": sum(1 for v in vals if PHONE_RE.search(v)) / n,
-        "zip": sum(1 for v in vals if ZIP_RE.match(v)) / n,
-        "icd10": sum(1 for v in vals if ICD10_RE.match(v.upper())) / n,
-        "npi": sum(1 for v in vals if NPI_RE.match(v)) / n,
-        "uuid": sum(1 for v in vals if UUID_RE.match(v)) / n,
-        "gender": sum(1 for v in vals if v.upper() in {"M", "F", "MALE", "FEMALE", "OTHER", "UNKNOWN"}) / n,
-        "numeric": sum(1 for v in vals if _is_numeric_text(v)) / n,
-    }
-
-
-def _is_numeric_text(v: str) -> bool:
-    try:
-        float(v)
-        return True
-    except Exception:
-        return False
-
-
-def semantic_resource_inference(table_name: str, columns: List[Dict[str, Any]], sample_rows: List[Dict[str, Any]]) -> Dict[str, Any]:
-    table_norm = normalize_name(table_name)
-    col_names = [normalize_name(c["name"]) for c in columns]
-
-    resource_scores: Dict[str, float] = {}
-    resource_reasons: Dict[str, List[str]] = {}
-
-    for resource, meta in FHIR_RESOURCE_CATALOG.items():
-        score = 0.0
-        reasons: List[str] = []
-
-        for hint in meta["hints"]:
-            sim = _similarity(table_norm, hint)
-            if hint in table_norm:
-                score += 0.22
-                reasons.append(f"table name resembles {hint}")
-            elif sim > 0.6:
-                score += sim * 0.12
-                reasons.append(f"table name similar to {hint}")
-
-        matched_cols = 0
-        for col in col_names:
-            for hint in RESOURCE_LINK_HINTS[resource]:
-                if hint in col or _similarity(col, hint) > 0.75:
-                    matched_cols += 1
-                    break
-        if col_names:
-            col_score = min(0.6, matched_cols / len(col_names) * 1.8)
-            score += col_score
-            if matched_cols:
-                reasons.append(f"{matched_cols} columns match {resource} semantics")
-
-        sample_patterns = _aggregate_patterns(columns, sample_rows)
-        if resource == "Patient" and sample_patterns.get("gender", 0) > 0.3:
-            score += 0.08
-            reasons.append("sample values contain gender-like codes")
-        if resource == "Patient" and sample_patterns.get("phone", 0) > 0.3:
-            score += 0.05
-            reasons.append("sample values contain phone-like values")
-        if resource == "Coverage" and any("payer" in c or "plan" in c for c in col_names):
-            score += 0.10
-            reasons.append("columns include payer/plan terminology")
-        if resource == "Claim" and sample_patterns.get("icd10", 0) > 0.2:
-            score += 0.12
-            reasons.append("sample values contain diagnosis codes")
-        if resource == "Claim" and sample_patterns.get("numeric", 0) > 0.2 and any("amount" in c for c in col_names):
-            score += 0.08
-            reasons.append("amount-like fields detected")
-
-        resource_scores[resource] = min(score, 0.99)
-        resource_reasons[resource] = reasons
-
-    best_resource = max(resource_scores, key=resource_scores.get)
-    best_score = resource_scores[best_resource]
-    return {
-        "table": table_name,
-        "inferred_resource": best_resource,
-        "confidence": round(best_score, 2),
-        "reasoning": resource_reasons[best_resource] or ["best semantic fit from table and column analysis"],
-        "candidate_scores": {k: round(v, 2) for k, v in resource_scores.items()},
-    }
-
-
-def _aggregate_patterns(columns: List[Dict[str, Any]], sample_rows: List[Dict[str, Any]]) -> Dict[str, float]:
-    totals: Dict[str, float] = {}
-    if not columns or not sample_rows:
-        return totals
-    for col in columns:
-        values = [row.get(col["name"]) for row in sample_rows]
-        pats = detect_value_patterns(values)
-        for k, v in pats.items():
-            totals[k] = max(totals.get(k, 0.0), v)
-    return totals
-
-
-def score_column_mapping(resource: str, column: Dict[str, Any], sample_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    candidates = []
-    resource_fields = FHIR_RESOURCE_CATALOG[resource]["fields"]
-    col_name = column["name"]
-    col_type = str(column.get("type", "")).lower()
-    samples = [row.get(col_name) for row in sample_rows]
-    patterns = detect_value_patterns(samples)
-
-    for target, meta in resource_fields.items():
-        alias_scores = []
-        alias_hits = []
-        normalized_col = normalize_name(col_name)
-        for alias in meta["aliases"]:
-            norm_alias = normalize_name(alias)
-            sim = _similarity(col_name, alias)
-            alias_scores.append(sim)
-            if normalized_col == norm_alias:
-                alias_hits.append(alias)
-                alias_scores.append(1.0)
-            elif alias in normalized_col or norm_alias in normalized_col:
-                alias_hits.append(alias)
-                alias_scores.append(min(1.0, sim + 0.25))
-
-        name_score = max(alias_scores) if alias_scores else 0.0
-        type_score = 0.0
-        normalized_types = [t.lower() for t in meta["types"]]
-        if any(t in col_type for t in normalized_types):
-            type_score = 1.0
-        elif any(t in col_type for t in ["text", "varchar"]) and any(t in normalized_types for t in ["text", "varchar"]):
-            type_score = 0.8
-        elif any(t in col_type for t in ["numeric", "decimal", "double", "real", "int", "bigint"]) and any(t in normalized_types for t in ["numeric", "decimal", "double precision", "real", "int", "bigint"]):
-            type_score = 0.85
-        elif any(t in col_type for t in ["date", "timestamp"]) and any(t in normalized_types for t in ["date", "timestamp"]):
-            type_score = 0.9
-
-        pattern_score, pattern_reason = pattern_match_score(target, patterns)
-        confidence = round(min(0.99, name_score * 0.70 + type_score * 0.15 + pattern_score * 0.15), 2)
-
-        exact_alias_match = any(normalized_col == normalize_name(alias) for alias in meta["aliases"])
-        strong_semantic_match = exact_alias_match or (name_score >= 0.95 and type_score >= 0.8)
-        if strong_semantic_match:
-            confidence = max(confidence, 0.9)
-        elif exact_alias_match and (pattern_score >= 0.5 or type_score >= 0.8):
-            confidence = max(confidence, 0.88)
-
-        reasons = []
-        if alias_hits:
-            reasons.append(f"name matched aliases: {', '.join(alias_hits[:2])}")
-        elif name_score > 0.7:
-            reasons.append("strong semantic column-name similarity")
-        if type_score >= 0.8:
-            reasons.append("datatype compatible")
-        if pattern_reason:
-            reasons.append(pattern_reason)
-
-        candidates.append({
-            "source_column": col_name,
-            "target_field": f"{resource}.{target}",
-            "confidence": confidence,
-            "reason": "; ".join(reasons) or "weak semantic match",
-            "sample_values": [stringify(v) for v in samples[:3]],
-            "data_type": column.get("type"),
-        })
-
-    candidates.sort(key=lambda x: x["confidence"], reverse=True)
-    return candidates[:5]
-
-
-def pattern_match_score(target_field: str, patterns: Dict[str, float]) -> Tuple[float, str]:
-    tf = target_field.lower()
-    if "birthdate" in tf or "period.start" in tf or "period.end" in tf or "created" in tf or "billableperiod" in tf:
-        if patterns.get("date", 0) > 0.5:
-            return patterns["date"], "sample values look like dates"
-    if "email" in tf and patterns.get("email", 0) > 0.5:
-        return patterns["email"], "sample values look like email addresses"
-    if "phone" in tf and patterns.get("phone", 0) > 0.4:
-        return patterns["phone"], "sample values look like phone numbers"
-    if "postalcode" in tf and patterns.get("zip", 0) > 0.4:
-        return patterns["zip"], "sample values look like postal codes"
-    if "diagnosis" in tf and patterns.get("icd10", 0) > 0.3:
-        return patterns["icd10"], "sample values look like ICD-10 codes"
-    if "provider.reference" in tf and patterns.get("npi", 0) > 0.3:
-        return patterns["npi"], "sample values look like provider identifiers"
-    if tf.endswith("id") and patterns.get("uuid", 0) > 0.3:
-        return patterns["uuid"], "sample values look like UUIDs"
-    if "total.value" in tf or "payment.amount.value" in tf:
-        if patterns.get("numeric", 0) > 0.5:
-            return patterns["numeric"], "sample values look numeric"
-    if "gender" in tf and patterns.get("gender", 0) > 0.4:
-        return patterns["gender"], "sample values look like gender codes"
-    return 0.0, ""
-
-
-def build_mapping_summary(schema_info: Dict[str, Any]) -> Dict[str, Any]:
-    mapping_summary = []
-    requires_review = []
-    unmapped_fields = []
-
-    for table_name, info in schema_info.items():
-        resource_info = semantic_resource_inference(table_name, info["columns_raw"], info["sample_rows"])
-        resource = resource_info["inferred_resource"]
-        field_mappings = []
-
-        for col in info["columns_raw"]:
-            if normalize_name(col["name"]) in IGNORE_SOURCE_COLUMNS:
-                mapping = {
-                    "source_column": col["name"],
-                    "target_field": None,
-                    "confidence": 0.0,
-                    "status": "ignored",
-                    "reason": "operational/source metadata field not mapped to FHIR",
-                    "candidates": [],
-                    "data_type": col["type"],
-                    "sample_values": [stringify(row.get(col["name"])) for row in info["sample_rows"][:3]],
-                }
-                field_mappings.append(mapping)
-                unmapped_fields.append({"table": table_name, "resource": resource, **mapping})
-                continue
-            candidates = score_column_mapping(resource, col, info["sample_rows"])
-            best = candidates[0] if candidates else None
-            status = "ignored"
-            target_field = None
-            confidence = 0.0
-            reason = "no confident mapping found"
-            if best:
-                target_field = best["target_field"]
-                confidence = best["confidence"]
-                reason = best["reason"]
-                if confidence >= AUTO_MAP_THRESHOLD:
-                    status = "auto_mapped"
-                elif confidence >= REVIEW_THRESHOLD:
-                    status = "requires_review"
-                else:
-                    status = "ignored"
-
-            mapping = {
-                "source_column": col["name"],
-                "target_field": target_field,
-                "confidence": confidence,
-                "status": status,
-                "reason": reason,
-                "candidates": candidates,
-                "data_type": col["type"],
-                "sample_values": [stringify(row.get(col["name"])) for row in info["sample_rows"][:3]],
-            }
-            field_mappings.append(mapping)
-            if status == "requires_review":
-                requires_review.append({"table": table_name, "resource": resource, **mapping})
-            elif status == "ignored":
-                unmapped_fields.append({"table": table_name, "resource": resource, **mapping})
-
-        mapping_summary.append({
-            "table": table_name,
-            "resource": resource,
-            "resource_confidence": resource_info["confidence"],
-            "resource_reasoning": resource_info["reasoning"],
-            "resource_candidates": resource_info["candidate_scores"],
-            "fields": field_mappings,
-            "row_count": info["row_count"],
-        })
-
-    return {
-        "mapping_summary": mapping_summary,
-        "requires_review": requires_review,
-        "unmapped_fields": unmapped_fields,
-    }
-
-
-def classify_value(column: str, value: Any) -> Any:
-    if value is None:
-        return None
-    text = stringify(value).strip()
-    if not text:
-        return text
-    if normalize_name(column) in {"gender", "sex"}:
-        return map_gender(text)
-    if "date" in normalize_name(column) or DATE_RE.match(text):
-        return normalize_date(text)
-    if EMAIL_RE.match(text):
-        return text.lower()
-    return text
-
-
-def map_gender(value: str) -> str:
-    v = value.strip().lower()
-    if v in {"m", "male"}:
-        return "male"
-    if v in {"f", "female"}:
-        return "female"
-    if v in {"other", "nonbinary", "non-binary"}:
-        return "other"
-    return "unknown"
-
-
 def normalize_date(value: Any) -> str:
     if value is None:
         return ""
@@ -402,12 +59,22 @@ def normalize_date(value: Any) -> str:
     if isinstance(value, datetime.date):
         return value.isoformat()
     s = stringify(value)
-    if DATE_RE.match(s):
-        return s[:10]
-    return s
+    return s[:10] if DATE_RE.match(s) else s
+
+
+def map_gender(value: str) -> str:
+    v = value.strip().lower()
+    if v in {"m", "male"}:
+        return "male"
+    if v in {"f", "female"}:
+        return "female"
+    if v in {"other", "nonbinary", "non-binary", "nb"}:
+        return "other"
+    return "unknown"
 
 
 def ensure_resource_id(value: Any) -> str:
+    """Ensure a value becomes a stable UUID-like FHIR id."""
     s = stringify(value).strip()
     if UUID_RE.match(s):
         return s
@@ -417,7 +84,113 @@ def ensure_resource_id(value: Any) -> str:
     return str(uuid.uuid5(namespace, s))
 
 
+def _normalize_icd10(code: str) -> str:
+    """Insert dot after position 3 only when no dot is already present."""
+    code = code.strip().upper()
+    if code and '.' not in code and len(code) >= 4:
+        return f"{code[:3]}.{code[3:]}"
+    return code
+
+
+def classify_value(target_field: str, source_col: str, value: Any) -> Any:
+    """
+    Apply semantic transformation based on the FHIR target field path,
+    not the source column name — so it works for any naming convention.
+    """
+    if value is None:
+        return None
+    text = stringify(value).strip()
+    if not text:
+        return text
+
+    tf = target_field.lower()
+
+    # IDs → stable UUID
+    if tf.endswith(".id") or (tf.endswith("[0].value") and "identifier" in tf):
+        return ensure_resource_id(value)
+
+    # References
+    if tf.endswith("beneficiary.reference") or tf.endswith("patient.reference"):
+        return f"Patient/{ensure_resource_id(value)}"
+    if tf.endswith("provider.reference"):
+        return f"Practitioner/{text}" if text else "Practitioner/unknown"
+
+    # Date fields
+    if any(k in tf for k in ("date", "period.start", "period.end", "created", "billableperiod")):
+        return normalize_date(value)
+
+    # Gender
+    if "gender" in tf:
+        return map_gender(text)
+
+    # ICD-10
+    if "diagnosiscodeableconcept" in tf and tf.endswith(".code"):
+        return _normalize_icd10(text)
+
+    # Numeric amounts
+    if tf.endswith(".value") and any(k in tf for k in ("total", "payment", "amount")):
+        try:
+            return float(value)
+        except (ValueError, TypeError):
+            return 0.0
+
+    # Email → lowercase
+    if "email" in tf or "telecom" in tf:
+        return text.lower() if "@" in text else text
+
+    return text
+
+
+# ---------------------------------------------------------------------------
+# FHIR path writer
+# ---------------------------------------------------------------------------
+
+# Named array indices that Claude may produce for telecom entries.
+# Maps the named key → (numeric index, FHIR system URI)
+_TELECOM_NAMED_INDICES: Dict[str, Tuple[int, str]] = {
+    "phone":  (0, "phone"),
+    "email":  (1, "email"),
+    "fax":    (2, "fax"),
+    "url":    (3, "url"),
+    "sms":    (4, "sms"),
+    "other":  (5, "other"),
+}
+
+
+def _normalize_fhir_path(path: str, resource: Dict[str, Any]) -> Tuple[str, Optional[Dict[str, Any]]]:
+    """
+    Normalize non-standard path segments before writing.
+
+    Handles telecom[phone].value → telecom[0].value  (and injects system="phone")
+    Handles telecom[email].value → telecom[1].value  (and injects system="email")
+
+    Returns (normalized_path, side_effect_entry_or_None).
+    The side_effect is applied to the telecom array entry to set the system field.
+    """
+    # Match pattern: word[named_key]  e.g. telecom[phone], telecom[email]
+    named_match = re.search(r'(\w+)\[([a-zA-Z_]+)\]', path)
+    if named_match:
+        arr_name = named_match.group(1)
+        named_key = named_match.group(2).lower()
+        if arr_name == "telecom" and named_key in _TELECOM_NAMED_INDICES:
+            idx, system = _TELECOM_NAMED_INDICES[named_key]
+            normalized = path.replace(f"telecom[{named_match.group(2)}]", f"telecom[{idx}]")
+            return normalized, {"system": system}
+        # Unknown named index — fall back to idx=0 to avoid literal key creation
+        idx_fallback = 0
+        normalized = re.sub(r'\[([a-zA-Z_]+)\]', f'[{idx_fallback}]', path, count=1)
+        return normalized, None
+    return path, None
+
+
 def set_fhir_path(resource: Dict[str, Any], path: str, value: Any) -> None:
+    """
+    Write a value into a nested FHIR resource dict using dot-notation paths.
+    Handles:
+      - Numeric array indices:  name[0].given[0]
+      - Named telecom indices:  telecom[phone].value → telecom[0] with system injected
+    """
+    path, side_effect = _normalize_fhir_path(path, resource)
     parts = path.split('.')
     cur: Any = resource
     for i, part in enumerate(parts):
@@ -431,9 +204,17 @@ def set_fhir_path(resource: Dict[str, Any], path: str, value: Any) -> None:
                 cur[name].append({})
             if last:
                 cur[name][idx] = value
+                # Apply side effect (e.g. inject system into telecom entry)
+                if side_effect and isinstance(cur[name][idx], dict):
+                    for k, v in side_effect.items():
+                        cur[name][idx].setdefault(k, v)
             else:
                 if not isinstance(cur[name][idx], dict):
                     cur[name][idx] = {}
+                # Apply side effect at the array entry level
+                if side_effect and i == len(parts) - 2:
+                    for k, v in side_effect.items():
+                        cur[name][idx].setdefault(k, v)
                 cur = cur[name][idx]
         else:
             if last:
@@ -444,50 +225,44 @@ def set_fhir_path(resource: Dict[str, Any], path: str, value: Any) -> None:
                 cur = cur[part]
 
 
-def build_fhir_resource(resource_type: str, row: Dict[str, Any], field_mappings: List[Dict[str, Any]]) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+# ---------------------------------------------------------------------------
+# FHIR resource builder — fully driven by mapping contract
+# ---------------------------------------------------------------------------
+
+def build_fhir_resource(
+    resource_type: str,
+    row: Dict[str, Any],
+    field_mappings: List[Dict[str, Any]],
+) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    """
+    Convert one source row to a FHIR resource using the mapping contract.
+    No field names are hardcoded — all logic is driven by target_field paths.
+    """
     resource: Dict[str, Any] = {"resourceType": resource_type}
     trace: List[Dict[str, Any]] = []
 
     auto_fields = [f for f in field_mappings if f["status"] == "auto_mapped" and f.get("target_field")]
+
     for mapping in auto_fields:
         source_col = mapping["source_column"]
         source_value = row.get(source_col)
         if source_value is None:
             continue
-        target_field = str(mapping["target_field"]).split('.', 1)[1]
-        transformed_value = classify_value(source_col, source_value)
 
-        if resource_type == "Patient" and target_field in {"id", "identifier[0].value"}:
-            transformed_value = ensure_resource_id(source_value)
-        elif resource_type == "Coverage" and target_field == "id":
-            transformed_value = ensure_resource_id(source_value)
-        elif resource_type == "Claim" and target_field == "id":
-            transformed_value = ensure_resource_id(source_value)
-        elif resource_type == "Coverage" and target_field == "beneficiary.reference":
-            transformed_value = f"Patient/{ensure_resource_id(source_value)}"
-        elif resource_type == "Claim" and target_field == "patient.reference":
-            transformed_value = f"Patient/{ensure_resource_id(source_value)}"
-        elif resource_type == "Claim" and target_field == "provider.reference":
-            transformed_value = f"Practitioner/{stringify(source_value)}"
-        elif resource_type == "Claim" and target_field in {"total.value", "payment.amount.value"}:
-            try:
-                transformed_value = float(source_value)
-            except Exception:
-                transformed_value = 0.0
-        # Normalize ICD-10: ensure dot present for codes >= 4 chars e.g. I100 -> I10.0
-        if resource_type == "Claim" and "diagnosis" in target_field and "code" in target_field:
-            code = stringify(transformed_value).strip().upper()
-            if code and len(code) >= 4 and '.' not in code:
-                transformed_value = f"{code[:3]}.{code[3:]}"
-            else:
-                transformed_value = code or stringify(source_value).strip().upper()
+        # Strip resource type prefix: "Patient.name[0].given[0]" → "name[0].given[0]"
+        raw_target = str(mapping["target_field"])
+        target_path = raw_target.split('.', 1)[1] if '.' in raw_target else raw_target
 
-        set_fhir_path(resource, target_field, transformed_value)
+        transformed_value = classify_value(raw_target, source_col, source_value)
+        if transformed_value is None:
+            continue
+
+        set_fhir_path(resource, target_path, transformed_value)
         trace.append({
             "source_column": source_col,
             "source_value": stringify(source_value),
-            "target_field": f"{resource_type}.{target_field}",
-            "transformed_value": transformed_value,
+            "target_field": raw_target,
+            "transformed_value": stringify(transformed_value),
             "confidence": mapping["confidence"],
             "reason": mapping["reason"],
         })
@@ -496,24 +271,72 @@ def build_fhir_resource(resource_type: str, row: Dict[str, Any], field_mappings:
     return resource, trace
 
 
+# ---------------------------------------------------------------------------
+# FHIR R4 defaults — fills required fields not covered by source data
+# ---------------------------------------------------------------------------
+
 def apply_resource_defaults(resource: Dict[str, Any]) -> None:
     rt = resource.get("resourceType")
     if rt == "Patient":
         resource.setdefault("id", str(uuid.uuid4()))
-        resource.setdefault("identifier", [{"system": "urn:brightcone:member", "value": resource.get("id", "")}])
-        resource.setdefault("name", [{"family": "", "given": [""]}])
+        resource.setdefault("identifier", [{"system": "urn:fhir:identifier", "value": resource["id"]}])
+        existing_name = resource.get("name")
+        if not existing_name:
+            resource["name"] = [{"use": "official", "family": "UNKNOWN", "given": ["UNKNOWN"]}]
+        else:
+            first = existing_name[0] if isinstance(existing_name, list) and existing_name else {}
+            if isinstance(first, dict):
+                if not first.get("family"):
+                    first["family"] = "UNKNOWN"
+                if not first.get("given") or not any(first.get("given", [])):
+                    first["given"] = ["UNKNOWN"]
         resource.setdefault("gender", "unknown")
+
+        # Ensure telecom entries have system field (FHIR R4 requires it)
+        # telecom[0] = phone, telecom[1] = email by convention
+        _TELECOM_SYSTEMS = ["phone", "email", "fax", "url", "sms", "other"]
+        for i, entry in enumerate(resource.get("telecom", [])):
+            if isinstance(entry, dict) and not entry.get("system") and i < len(_TELECOM_SYSTEMS):
+                entry["system"] = _TELECOM_SYSTEMS[i]
+            if isinstance(entry, dict) and not entry.get("use"):
+                entry.setdefault("use", "home")
+
     elif rt == "Coverage":
         resource.setdefault("id", str(uuid.uuid4()))
         resource.setdefault("status", "active")
         resource.setdefault("beneficiary", {"reference": "Patient/UNKNOWN"})
+        resource.setdefault("type", {
+            "coding": [{"system": "http://terminology.hl7.org/CodeSystem/v3-ActCode", "code": "HIP"}],
+            "text": "health insurance plan policy",
+        })
+        resource.setdefault("subscriber", resource.get("beneficiary", {"reference": "Patient/UNKNOWN"}))
+        resource.setdefault("payor", [{"display": "Unknown Payor"}])
+
     elif rt == "Claim":
         resource.setdefault("id", str(uuid.uuid4()))
         resource.setdefault("status", "active")
         resource.setdefault("use", "claim")
-        resource.setdefault("type", {"coding": [{"system": "http://terminology.hl7.org/CodeSystem/claim-type", "code": "professional"}]})
+        resource.setdefault("type", {
+            "coding": [{"system": "http://terminology.hl7.org/CodeSystem/claim-type", "code": "professional"}]
+        })
         resource.setdefault("priority", {"coding": [{"code": "normal"}]})
+        resource.setdefault("patient", {"reference": "Patient/UNKNOWN"})
+        resource.setdefault("provider", {"display": "Unknown Provider"})
+        resource.setdefault("insurer", {"display": "Unknown Insurer"})
+        resource.setdefault("created", datetime.date.today().isoformat())
+        resource.setdefault("billablePeriod", {"start": "1970-01-01", "end": "1970-01-01"})
 
+    elif rt == "Practitioner":
+        resource.setdefault("id", str(uuid.uuid4()))
+
+    elif rt == "Organization":
+        resource.setdefault("id", str(uuid.uuid4()))
+        resource.setdefault("active", True)
+
+
+# ---------------------------------------------------------------------------
+# FHIR R4 structural validator
+# ---------------------------------------------------------------------------
 
 def validate_fhir_resource(resource: Dict[str, Any]) -> List[str]:
     errors: List[str] = []
@@ -526,32 +349,302 @@ def validate_fhir_resource(resource: Dict[str, Any]) -> List[str]:
         if not resource.get("id"):
             errors.append("Patient.id missing")
         names = resource.get("name") or []
-        if not names or not isinstance(names, list):
+        if not names:
             errors.append("Patient.name missing")
         else:
-            first = names[0] or {}
-            if not first.get("family") and not first.get("given"):
-                errors.append("Patient.name requires family or given")
+            first = names[0] if names else {}
+            family = first.get("family", "")
+            given = first.get("given", [])
+            if not family and not any(g for g in given if g and g != "UNKNOWN"):
+                errors.append("Patient.name requires non-empty family or given")
         bd = resource.get("birthDate")
         if bd and not DATE_RE.match(stringify(bd)):
-            errors.append("Patient.birthDate invalid")
+            errors.append("Patient.birthDate must be YYYY-MM-DD")
+        gender = stringify(resource.get("gender", "")).lower()
+        if gender and gender not in _VALID_GENDERS:
+            errors.append(f"Patient.gender '{gender}' invalid; must be one of {sorted(_VALID_GENDERS)}")
 
     elif rt == "Coverage":
-        if not resource.get("beneficiary", {}).get("reference"):
+        if not (resource.get("beneficiary") or {}).get("reference"):
             errors.append("Coverage.beneficiary.reference missing")
-        status = stringify(resource.get("status"))
-        if not status:
+        if not resource.get("status"):
             errors.append("Coverage.status missing")
+        if not resource.get("type"):
+            errors.append("Coverage.type missing (FHIR R4 required)")
+        if not resource.get("payor"):
+            errors.append("Coverage.payor missing (FHIR R4 required)")
 
     elif rt == "Claim":
-        if not resource.get("patient", {}).get("reference"):
+        if not (resource.get("patient") or {}).get("reference"):
             errors.append("Claim.patient.reference missing")
-        if not resource.get("diagnosis"):
-            errors.append("Claim.diagnosis missing")
-        if resource.get("total") and "value" in resource.get("total", {}):
+        provider = resource.get("provider") or {}
+        if not provider.get("reference") and not provider.get("display"):
+            errors.append("Claim.provider missing (FHIR R4 required)")
+        if not resource.get("billablePeriod"):
+            errors.append("Claim.billablePeriod missing (FHIR R4 required)")
+        if not resource.get("insurer"):
+            errors.append("Claim.insurer missing (FHIR R4 required)")
+        total = resource.get("total")
+        if total and "value" in total:
             try:
-                float(resource["total"]["value"])
-            except Exception:
-                errors.append("Claim.total.value invalid")
+                float(total["value"])
+            except (ValueError, TypeError):
+                errors.append("Claim.total.value must be numeric")
 
     return errors
+
+
+# ---------------------------------------------------------------------------
+# Mapping summary builder — Claude-first, structural fallback
+# ---------------------------------------------------------------------------
+
+def build_mapping_summary(schema_info: Dict[str, Any], anthropic_api_key: str = "") -> Dict[str, Any]:
+    """
+    Build FHIR field mapping for all discovered source tables.
+
+    Claude AI path (primary):
+      - One API call per table during discovery.
+      - Understands any column naming: abbreviations, legacy codes, non-English.
+      - Returns structured mapping with confidence scores.
+
+    Structural fallback (when Claude is unavailable):
+      - Uses data type patterns and sample value analysis only.
+      - No hardcoded field name aliases.
+      - Maps columns to FHIR paths based on value shape: date → date fields,
+        UUID → id fields, numeric → amount fields, etc.
+    """
+    from claude_mapper import ai_map_table, normalize_ai_mapping_to_engine_format
+
+    mapping_summary = []
+    requires_review: List[Dict] = []
+    unmapped_fields: List[Dict] = []
+
+    use_ai = bool(
+        anthropic_api_key
+        and anthropic_api_key.strip()
+        and not anthropic_api_key.startswith("your-")
+    )
+
+    for table_name, info in schema_info.items():
+        ai_result = None
+
+        if use_ai:
+            ai_result = ai_map_table(
+                table_name,
+                info["columns_raw"],
+                info["sample_rows"],
+                anthropic_api_key,
+            )
+
+        if ai_result:
+            normalized = normalize_ai_mapping_to_engine_format(
+                ai_result, table_name, info["row_count"]
+            )
+            table_entry = normalized["table_summary"]
+
+            # Enrich fields with actual data type and sample values from schema
+            col_meta = {c["name"]: c for c in info["columns_raw"]}
+            for field in table_entry["fields"]:
+                col = col_meta.get(field["source_column"], {})
+                field["data_type"] = col.get("type")
+                field["sample_values"] = [
+                    stringify(row.get(field["source_column"]))
+                    for row in info["sample_rows"][:3]
+                ]
+
+            requires_review.extend(normalized["requires_review"])
+            unmapped_fields.extend(normalized["unmapped_fields"])
+            mapping_summary.append(table_entry)
+        else:
+            # Structural fallback — no aliases, value-shape driven
+            table_entry = _structural_fallback_map(
+                table_name, info, requires_review, unmapped_fields
+            )
+            mapping_summary.append(table_entry)
+
+    return {
+        "mapping_summary": mapping_summary,
+        "requires_review": requires_review,
+        "unmapped_fields": unmapped_fields,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Structural fallback mapper — value-shape driven, zero hardcoded names
+# ---------------------------------------------------------------------------
+
+def _structural_fallback_map(
+    table_name: str,
+    info: Dict[str, Any],
+    requires_review: list,
+    unmapped_fields: list,
+) -> Dict[str, Any]:
+    """
+    When Claude is unavailable, infer FHIR resource type and field mappings
+    purely from data type and sample value shapes. No column name aliases.
+    """
+    import re as _re
+
+    EMAIL_RE = _re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
+    PHONE_RE = _re.compile(r'\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}')
+    ZIP_RE = _re.compile(r'^\d{5}(?:-\d{4})?$')
+    ICD10_RE = _re.compile(r'^[A-Z]\d{2}(?:\.\w{1,4})?$')
+    NPI_RE = _re.compile(r'^\d{10}$')
+
+    def _sample_vals(col_name: str) -> List[str]:
+        return [stringify(r.get(col_name)).strip() for r in info["sample_rows"] if stringify(r.get(col_name)).strip()]
+
+    def _detect_shape(col_name: str, col_type: str) -> str:
+        samples = _sample_vals(col_name)
+        if not samples:
+            return "unknown"
+        ct = col_type.lower()
+        if any(t in ct for t in ("date", "timestamp")):
+            return "date"
+        if any(t in ct for t in ("numeric", "decimal", "double", "real", "float")):
+            return "numeric"
+        if any(t in ct for t in ("int", "bigint", "smallint")):
+            return "integer"
+        if any(DATE_RE.match(v) for v in samples):
+            return "date"
+        if any(NPI_RE.match(v) for v in samples):
+            return "npi"
+        if any(ICD10_RE.match(v.upper()) for v in samples):
+            return "icd10"
+        if any(UUID_RE.match(v) for v in samples):
+            return "uuid"
+        if any(EMAIL_RE.match(v) for v in samples):
+            return "email"
+        if any(PHONE_RE.search(v) for v in samples):
+            return "phone"
+        if any(ZIP_RE.match(v) for v in samples):
+            return "zip"
+        if any(v.upper() in {"M", "F", "MALE", "FEMALE", "OTHER", "UNKNOWN"} for v in samples):
+            return "gender"
+        if all(_is_numeric(v) for v in samples):
+            return "numeric"
+        return "text"
+
+    def _is_numeric(v: str) -> bool:
+        try:
+            float(v)
+            return True
+        except (ValueError, TypeError):
+            return False
+
+    # Infer resource type from column shapes (not names)
+    shapes = {}
+    for col in info["columns_raw"]:
+        shapes[col["name"]] = _detect_shape(col["name"], col.get("type", ""))
+
+    has_icd10 = any(s == "icd10" for s in shapes.values())
+    has_npi = any(s == "npi" for s in shapes.values())
+    has_gender = any(s == "gender" for s in shapes.values())
+    has_two_dates = sum(1 for s in shapes.values() if s == "date") >= 2
+    numeric_count = sum(1 for s in shapes.values() if s == "numeric")
+
+    if has_icd10 or has_npi:
+        resource_type = "Claim"
+        resource_confidence = 0.80
+        resource_reasoning = ["ICD-10 or NPI values detected in sample data"]
+    elif has_gender and has_two_dates:
+        resource_type = "Patient"
+        resource_confidence = 0.75
+        resource_reasoning = ["Gender codes and multiple date fields suggest demographic data"]
+    elif has_two_dates and numeric_count == 0:
+        resource_type = "Coverage"
+        resource_confidence = 0.70
+        resource_reasoning = ["Multiple date fields with no numeric amounts suggest coverage periods"]
+    else:
+        resource_type = "Patient"
+        resource_confidence = 0.50
+        resource_reasoning = ["Default inference — set ANTHROPIC_API_KEY for accurate mapping"]
+
+    # Map columns to FHIR paths by value shape
+    SHAPE_TO_FHIR: Dict[str, Dict[str, str]] = {
+        "Patient": {
+            "date": "Patient.birthDate",
+            "gender": "Patient.gender",
+            "email": "Patient.telecom[0].value",
+            "phone": "Patient.telecom[1].value",
+            "zip": "Patient.address[0].postalCode",
+            "uuid": "Patient.id",
+            "text": "Patient.id",
+        },
+        "Coverage": {
+            "date": "Coverage.period.start",
+            "uuid": "Coverage.id",
+            "text": "Coverage.id",
+        },
+        "Claim": {
+            "date": "Claim.billablePeriod.start",
+            "icd10": "Claim.diagnosis[0].diagnosisCodeableConcept.coding[0].code",
+            "npi": "Claim.provider.reference",
+            "numeric": "Claim.total.value",
+            "uuid": "Claim.id",
+            "text": "Claim.id",
+        },
+    }
+
+    shape_map = SHAPE_TO_FHIR.get(resource_type, {})
+    used_targets: Dict[str, int] = {}  # target → usage count for deduplication
+    field_mappings = []
+
+    for col in info["columns_raw"]:
+        col_name = col["name"]
+        if col_name.lower() in OPERATIONAL_COLUMNS:
+            entry = {
+                "source_column": col_name,
+                "target_field": None,
+                "confidence": 0.0,
+                "status": "ignored",
+                "reason": "operational metadata column",
+                "candidates": [],
+                "data_type": col.get("type"),
+                "sample_values": _sample_vals(col_name)[:3],
+            }
+            field_mappings.append(entry)
+            unmapped_fields.append({"table": table_name, "resource": resource_type, **entry})
+            continue
+
+        shape = shapes.get(col_name, "unknown")
+        raw_target = shape_map.get(shape)
+
+        # Handle duplicate targets (e.g. two date columns)
+        if raw_target:
+            count = used_targets.get(raw_target, 0)
+            if count > 0:
+                # Shift arrays: period.start → period.end, diagnosis[0] → diagnosis[1], etc.
+                raw_target = raw_target.replace("[0]", f"[{count}]").replace(".start", ".end" if count == 1 else f"[{count}]")
+            used_targets[raw_target] = count + 1
+
+        confidence = 0.75 if raw_target else 0.0
+        status = "auto_mapped" if confidence >= AUTO_MAP_THRESHOLD else ("requires_review" if confidence >= REVIEW_THRESHOLD else "ignored")
+
+        entry = {
+            "source_column": col_name,
+            "target_field": raw_target,
+            "confidence": confidence,
+            "status": status,
+            "reason": f"inferred from value shape: {shape}" if raw_target else "no structural match found",
+            "candidates": [],
+            "data_type": col.get("type"),
+            "sample_values": _sample_vals(col_name)[:3],
+        }
+        field_mappings.append(entry)
+
+        if status == "requires_review":
+            requires_review.append({"table": table_name, "resource": resource_type, **entry})
+        elif status == "ignored":
+            unmapped_fields.append({"table": table_name, "resource": resource_type, **entry})
+
+    return {
+        "table": table_name,
+        "resource": resource_type,
+        "resource_confidence": resource_confidence,
+        "resource_reasoning": resource_reasoning,
+        "resource_candidates": {},
+        "fields": field_mappings,
+        "row_count": info["row_count"],
+        "mapped_by": "structural_fallback",
+    }
