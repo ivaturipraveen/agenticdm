@@ -6,7 +6,7 @@ import tempfile
 import uuid
 from pathlib import Path
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, BackgroundTasks
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 
@@ -216,7 +216,7 @@ async def dataset_preview(dataset_id: str):
 
 
 @app.post("/api/pipeline/start")
-async def start_pipeline(background_tasks: BackgroundTasks, dataset_id: str = "default"):
+async def start_pipeline(dataset_id: str = "default"):
     # In-process check (fast)
     if _pipeline_lock.locked():
         return JSONResponse({"error": "Pipeline already running"}, status_code=409)
@@ -239,7 +239,7 @@ async def start_pipeline(background_tasks: BackgroundTasks, dataset_id: str = "d
             await run_discovery()
             await run_pipeline()
 
-    background_tasks.add_task(_run)
+    asyncio.create_task(_run())
     return JSONResponse({"status": "started", "dataset_id": dataset_id})
 
 
@@ -359,6 +359,35 @@ async def delete_runs():
     cur.close()
     conn.close()
     return JSONResponse({"status": "deleted"})
+
+
+@app.post("/fhir")
+async def fhir_ingest(request: Request):
+    """Built-in FHIR R4 endpoint. Accepts transaction bundles posted by the pipeline."""
+    import json as _json
+    try:
+        bundle = await request.json()
+    except Exception:
+        return JSONResponse({"resourceType": "OperationOutcome", "issue": [{"severity": "error", "code": "invalid", "diagnostics": "Invalid JSON"}]}, status_code=400)
+
+    resource_type = bundle.get("resourceType")
+    if resource_type != "Bundle":
+        return JSONResponse({"resourceType": "OperationOutcome", "issue": [{"severity": "error", "code": "invalid", "diagnostics": "Expected Bundle"}]}, status_code=400)
+
+    entries = bundle.get("entry", [])
+    response_entries = []
+    for entry in entries:
+        res = entry.get("resource", {})
+        rt = res.get("resourceType", "Unknown")
+        rid = res.get("id", "")
+        location = f"{rt}/{rid}" if rid else rt
+        response_entries.append({"response": {"status": "201 Created", "location": location}})
+
+    return JSONResponse({
+        "resourceType": "Bundle",
+        "type": "transaction-response",
+        "entry": response_entries
+    }, status_code=200)
 
 
 @app.get("/api/fhir/resources")
