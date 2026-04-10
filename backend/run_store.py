@@ -32,7 +32,6 @@ def create_run(run_id: str, dataset_id: str) -> None:
               (run_id, dataset_id, dataset_name, started_at, status)
             VALUES (%s, %s, %s, NOW(), 'running')
         """, (run_id, dataset_id, dataset_id.replace('_', ' ').title()))
-        """, (run_id, dataset_id, DATASET_META.get(dataset_id, {}).get("name", dataset_id)))
         cur.close()
 
 
