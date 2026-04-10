@@ -56,7 +56,6 @@ const STAGES = [
 ]
 
 export default function PreMigrationView({ onStartRun }: { onStartRun?: () => void } = {}) {
-  const [starting, setStarting] = useState(false)
   const [db, setDb] = useState<DbPreview | null>(null)
   const [loading, setLoading] = useState(false)
   const selectedDatasetId = usePipelineStore(s => s.selectedDatasetId)
@@ -64,6 +63,7 @@ export default function PreMigrationView({ onStartRun }: { onStartRun?: () => vo
   const startFn = usePipelineStore(s => s.startPipeline)
   const stage = usePipelineStore(s => s.stage)
   const runId = usePipelineStore(s => s.runId)
+  const pipelineStarting = usePipelineStore(s => s.pipelineStarting)
 
   useEffect(() => {
     setLoading(true)
@@ -108,15 +108,21 @@ export default function PreMigrationView({ onStartRun }: { onStartRun?: () => vo
                   </div>
                 ) : (
                   <button
+                    type="button"
                     onClick={async () => {
-                      if (starting) return
-                      setStarting(true)
-                      try { await startFn(); onStartRun?.() } catch(e) { console.error(e) } finally { setStarting(false) }
+                      if (pipelineStarting) return
+                      const runPromise = startFn()
+                      onStartRun?.()
+                      try {
+                        await runPromise
+                      } catch (e) {
+                        console.error(e)
+                      }
                     }}
-                    disabled={loading || !db || starting}
+                    disabled={loading || !db || pipelineStarting}
                     className="flex items-center gap-2 px-8 py-3 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold rounded-2xl text-sm shadow-sm transition-all"
                   >
-                    {starting ? <><span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />Starting…</> : 'Start Migration'}
+                    {pipelineStarting ? <><span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />Starting…</> : 'Start Migration'}
                   </button>
                 )}
               </div>

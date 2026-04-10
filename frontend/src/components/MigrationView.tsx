@@ -203,12 +203,13 @@ function DiscoveryView() {
  </div>
  </Section>
 
- {/* Review queue */}
+ {/* Review queue — field-level mapping, not the final FHIR load approval */}
  {pendingReviews.length > 0 && (
  <div className="rounded-2xl border-2 border-amber-300 bg-amber-50 overflow-hidden shadow-sm">
  <div className="px-5 py-4 border-b border-amber-200">
  <div className="flex items-center justify-between">
  <div>
+ <div className="text-[10px] font-bold uppercase tracking-wider text-amber-800/80 mb-1">Field mapping review</div>
  <div className="font-bold text-amber-900">{pendingReviews.length} field{pendingReviews.length > 1 ? 's' : ''} need your decision</div>
  <div className="text-sm text-amber-700 mt-1">Pipeline is paused. Resolve each field below, then it will continue automatically. Each decision applies to all rows with that field.</div>
  </div>
@@ -260,7 +261,7 @@ function TransformationView() {
  <Section title="Converted output samples" subtitle="Examples of how source data is being transformed.">
  <div className="grid grid-cols-2 gap-4">{fhirSamples.slice(0, 2).map((sample: unknown, idx: number) => <div key={idx} className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm"><div className="text-sm font-semibold text-slate-900 mb-2">Sample {idx + 1}</div><pre className="text-xs text-slate-700 whitespace-pre-wrap overflow-x-auto">{JSON.stringify(sample, null, 2)}</pre></div>)}</div>
  </Section>
- <Section title="Review-required items" subtitle="Mappings or conversions that still need an operator decision.">
+ <Section title="Field mapping review" subtitle="Per-column mapping decisions — separate from the final “approve load to FHIR” step at the end of the run.">
  {pendingReviews.length === 0 ? <div className="rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-500 shadow-sm">No unresolved transformation review items.</div> : <div className="space-y-3">{pendingReviews.map((item, idx) => <ReviewCard key={`${item.table}-${item.source_column}-${idx}`} item={item} />)}</div>}
  </Section>
  <Section title="Validation results" subtitle="Rows that failed FHIR validation rules.">
@@ -339,7 +340,16 @@ function OrchestrationView() {
  )}
  </Section>
 
- <Section title="Approval gate" subtitle="The pipeline pauses here and waits for human confirmation before sending data to FHIR.">
+ <Section title="Final load approval" subtitle="After validation, the pipeline opens a dialog to approve or reject posting resources to FHIR — this is not the same as field mapping review above.">
+ {stage === 'AWAITING_APPROVAL' && approvalGate ? (
+ <div className="rounded-2xl border-2 border-cyan-300 bg-cyan-50 p-5 shadow-sm">
+ <div className="text-sm font-bold text-cyan-900 mb-2">Action required in the approval dialog</div>
+ <p className="text-sm text-cyan-800 leading-relaxed">
+ Use the popup overlay to <span className="font-semibold">approve and load</span> or <span className="font-semibold">reject</span>.
+ Rejecting records the run as halted in the audit log and does not send data to FHIR.
+ </p>
+ </div>
+ ) : (
  <div className="grid grid-cols-2 gap-4">
  <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
  <div className="text-sm font-semibold text-slate-900 mb-2">Gate status</div>
@@ -350,6 +360,7 @@ function OrchestrationView() {
  <div className="text-sm text-slate-700 leading-relaxed">Resources are batch-loaded to the FHIR endpoint above and stored in the FHIR Registry. The QA Agent then verifies the counts.</div>
  </div>
  </div>
+ )}
  </Section>
  </div>
  )

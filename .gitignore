@@ -14,6 +14,7 @@ backend/*.pyo
 backend/.env
 .env
 .env.*
+.venv/
 
 # Runtime artifacts
 backend/anomalies.jsonl

@@ -222,13 +222,15 @@ async def run_pipeline() -> None:
         )
 
         success_rate = round((total_transformed / max(total_source, 1)) * 100, 1)
-        await ws_manager.broadcast("APPROVAL_GATE", {
+        gate_payload = {
             "records_to_load": total_transformed,
             "anomaly_count": len(all_anomalies),
             "success_rate": success_rate,
             "validation_passed": validation_passed,
             "waiting_since": __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat(),
-        })
+        }
+        await pipeline_state.set_approval_gate(gate_payload)
+        await ws_manager.broadcast("APPROVAL_GATE", gate_payload)
         await _log(run_id, "orchestration", "Awaiting human approval", "awaiting_approval", total_transformed,
                    f"Resources={total_transformed}, Review={len(all_review_items)}, Failures={len(all_validation_errors)}")
         await ws_manager.send_log_message(f"Pipeline paused - awaiting approval to load {total_transformed:,} FHIR resources", "warning", run_id)

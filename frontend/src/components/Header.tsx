@@ -45,12 +45,15 @@ export default function Header() {
     <header className="flex items-center justify-between px-6 py-3.5 border-b border-slate-200 bg-white shrink-0">
       {/* Logo */}
       <div className="flex items-center gap-3">
-        <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-blue-600 to-blue-700 flex items-center justify-center shadow-sm">
-          <span className="text-white font-black text-base">B</span>
-        </div>
-        <div>
-          <div className="text-slate-900 font-bold text-base leading-tight">Brightcone Migration Platform</div>
-          <div className="text-slate-400 text-[11px] mt-0.5">Agentic Healthcare Data Migration</div>
+        <img
+          src="/unnamed.webp"
+          alt="Brightcone"
+          className="h-9 w-auto max-w-[200px] object-contain object-left"
+        />
+        <div className="hidden sm:flex sm:items-center sm:min-h-9 border-l border-slate-200 pl-3">
+          <div className="text-slate-500 text-base font-medium leading-none whitespace-nowrap">
+            Agentic Healthcare Data Migration
+          </div>
         </div>
       </div>
 

@@ -30,6 +30,11 @@ export default function App() {
     if (isRunning) setTab('run')
   }, [isRunning])
 
+  // Final FHIR approval opens a modal — bring user to Active Run so context matches the popup
+  useEffect(() => {
+    if (approvalGate) setTab('run')
+  }, [approvalGate])
+
   // When run completes or halts, return to home — never force back to migration
   useEffect(() => {
     if (stage === 'COMPLETE' || stage === 'HALTED') {

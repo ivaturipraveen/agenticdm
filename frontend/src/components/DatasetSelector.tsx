@@ -13,6 +13,16 @@ const COLOR_MAP: Record<string, { border: string; badge: string; bg: string; sel
 
 interface Props { onSelect: (id: string) => void; selected: string }
 
+function DatasetStackIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <ellipse cx="12" cy="5" rx="9" ry="3" />
+      <path d="M3 5v14c0 1.66 4.03 3 9 3s9-1.34 9-3V5" />
+      <path d="M3 12c0 1.66 4.03 3 9 3s9-1.34 9-3" />
+    </svg>
+  )
+}
+
 export default function DatasetSelector({ onSelect, selected }: Props) {
   const [datasets, setDatasets] = useState<DatasetInfo[]>([])
   const [loading, setLoading] = useState(true)
@@ -47,7 +57,17 @@ export default function DatasetSelector({ onSelect, selected }: Props) {
               </div>
             )}
             <div className="flex items-start gap-3 mb-3">
-              <span className={clsx('px-2 py-0.5 rounded-md text-[11px] font-bold border', c.badge)}>{ds.badge}</span>
+              <div
+                className={clsx(
+                  'w-10 h-10 rounded-xl shrink-0 flex items-center justify-center border bg-slate-50 text-slate-600',
+                  isSelected ? 'border-blue-200 bg-blue-50 text-blue-700' : 'border-slate-200',
+                )}
+              >
+                <DatasetStackIcon className="w-5 h-5" />
+              </div>
+              <span className={clsx('px-2 py-0.5 rounded-md text-[11px] font-bold border self-center', c.badge)}>
+                {ds.badge ?? 'Dataset'}
+              </span>
             </div>
             <div className="text-slate-900 font-bold text-sm mb-1">{ds.name}</div>
             <div className="text-slate-500 text-xs mb-3 leading-relaxed">{ds.description}</div>

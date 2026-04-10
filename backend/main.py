@@ -53,6 +53,8 @@ async def ws_endpoint(websocket: WebSocket):
             "stage": pipeline_state.current_stage.value,
             "run_id": pipeline_state.run_id or "",
         }))
+        if pipeline_state.current_stage == Stage.AWAITING_APPROVAL and pipeline_state.approval_gate:
+            await websocket.send_text(json.dumps({"type": "APPROVAL_GATE", **pipeline_state.approval_gate}))
         for name, data in pipeline_state.agent_statuses.items():
             await websocket.send_text(json.dumps({
                 "type": "AGENT_STATUS", "agent": name, "status": data["status"],
@@ -229,6 +231,7 @@ async def start_pipeline(dataset_id: str = "default"):
     async def _run():
         async with _pipeline_lock:
             from agents.discovery_agent import run_discovery
+            await pipeline_state.clear_approval_gate()
             pipeline_state.current_dataset_id = dataset_id
             for agent in pipeline_state.agent_statuses:
                 if agent != "monitor":

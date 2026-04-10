@@ -6,7 +6,9 @@ import {
  ReasoningStep, SchemaDriftData, SchemaMapping, WsEvent,
  ComplianceReport, MigrationRun, ReviewItem,
 } from '../types/pipeline'
-import { startPipeline, approvePipeline, haltPipeline, confirmDrift, resolveReview, apiUrl } from '../api/client'
+import {
+ startPipeline, approvePipeline, haltPipeline as requestHaltPipeline, confirmDrift, resolveReview, apiUrl, getPipelineStatus,
+} from '../api/client'
 
 const DEFAULT_AGENT = (name: AgentName): AgentState => ({
  name,
@@ -35,16 +37,19 @@ interface PipelineStore {
  runs: MigrationRun[]
  migrationSummary: Record<string, unknown> | null
  pendingReviews: ReviewItem[]
+ /** True from Start click until backend reports a non-IDLE stage (keeps “Starting…” after tab switch). */
+ pipelineStarting: boolean
  handleWsEvent: (event: WsEvent) => void
  resolveReviewItem: (payload: { table: string; source_column: string; decision: 'accept' | 'reject' | 'edit'; selected_target?: string }) => Promise<void>
  startPipeline: () => Promise<void>
  approvePipeline: () => Promise<void>
- haltPipeline: () => Promise<void>
+ haltPipeline: (reason?: 'approval_reject' | 'stop') => Promise<void>
  confirmDrift: () => Promise<void>
  setDriftDrawerOpen: (open: boolean) => void
  setActiveAgentTab: (agent: AgentName) => void
  setSelectedDataset: (id: string) => void
  resetPipeline: () => Promise<void>
+ hydrateApprovalGateIfMissing: () => Promise<void>
 }
 
 export const usePipelineStore = create<PipelineStore>((set, get) => ({
@@ -68,6 +73,7 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
  runs: [],
  migrationSummary: null,
  pendingReviews: [],
+ pipelineStarting: false,
  startTime: null,
  driftDrawerOpen: false,
  activeAgentTab: 'discovery',
@@ -86,8 +92,6 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
  last_active: event.timestamp,
  },
  },
- // Auto-switch tab to the active agent
- activeAgentTab: event.status === 'running' ? event.agent : s.activeAgentTab,
  }))
  break
  }
@@ -121,9 +125,15 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
  stage: event.stage,
  runId: event.run_id || s.runId,
  startTime: isStarting ? new Date() : s.startTime,
+ pipelineStarting: event.stage !== 'IDLE' ? false : s.pipelineStarting,
  // Only clear approval gate once we've moved past it (LOAD stage or beyond)
  approvalGate: ['LOAD','RECONCILE','COMPLETE','HALTED'].includes(event.stage) ? null : s.approvalGate,
  }))
+ if (event.stage === 'AWAITING_APPROVAL') {
+ // WS can drop APPROVAL_GATE under Vite proxy; REST snapshot + delayed fetch covers the gap
+ void get().hydrateApprovalGateIfMissing()
+ setTimeout(() => void get().hydrateApprovalGateIfMissing(), 400)
+ }
  break
  }
  case 'APPROVAL_GATE': {
@@ -169,7 +179,7 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
  }
  case 'MIGRATION_SUMMARY': {
  // Pipeline done — move back to IDLE so selection screen shows
- set({ migrationSummary: event as unknown as Record<string, unknown> })
+ set({ migrationSummary: event as unknown as Record<string, unknown>, pipelineStarting: false })
  break
  }
  case 'TOAST': {
@@ -196,14 +206,21 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
  schemaMapping: null,
  logMessages: [],
  startTime: new Date(),
+ pipelineStarting: true,
  activeAgentTab: 'discovery',
  agents: (Object.fromEntries(
  Object.entries(s.agents).map(([k, v]) => [k, { ...v, reasoning: [], records_processed: 0, status: k === 'monitor' ? 'watching' : 'idle' as AgentStatus, last_action: '' }])
  ) as unknown) as Record<AgentName, AgentState>,
  }))
  const dsId = get().selectedDatasetId
+ try {
  await startPipeline(dsId)
  toast(' Migration pipeline started!', { duration: 3000 })
+ } catch (e) {
+ set({ pipelineStarting: false })
+ toast.error('Could not start pipeline — check backend logs')
+ console.error(e)
+ }
  },
 
  approvePipeline: async () => {
@@ -217,11 +234,15 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
  }
  },
 
- haltPipeline: async () => {
+ haltPipeline: async (reason) => {
  try {
- await haltPipeline()
+ await requestHaltPipeline()
  set({ approvalGate: null })
+ if (reason === 'approval_reject') {
+ toast('FHIR load rejected — run saved as halted (audit log updated)', { icon: '', duration: 5000 })
+ } else {
  toast.error('Pipeline halted')
+ }
  } catch (e) {
  toast.error('Halt failed — please try again')
  }
@@ -249,6 +270,7 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
  schemaDrift: null,
  schemaMapping: null,
  pendingReviews: [],
+ pipelineStarting: false,
  activeAgentTab: 'discovery',
  agents: (Object.fromEntries(
  Object.entries(s.agents).map(([k, v]) => [k, { ...v, reasoning: [], records_processed: 0, status: k === 'monitor' ? 'watching' : 'idle' as AgentStatus, last_action: '' }])
@@ -259,4 +281,27 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
  setDriftDrawerOpen: (open) => set({ driftDrawerOpen: open }),
  setActiveAgentTab: (agent) => set({ activeAgentTab: agent }),
  setSelectedDataset: (id) => set({ selectedDatasetId: id }),
+
+ hydrateApprovalGateIfMissing: async () => {
+ if (get().approvalGate) return
+ if (get().stage !== 'AWAITING_APPROVAL') return
+ try {
+ const { data } = await getPipelineStatus()
+ const g = (data as { stage?: string; approval_gate?: Record<string, unknown> | null }).approval_gate
+ if (data.stage === 'AWAITING_APPROVAL' && g && typeof g.records_to_load === 'number') {
+ set({
+ approvalGate: {
+ records_to_load: g.records_to_load,
+ anomaly_count: Number(g.anomaly_count ?? 0),
+ success_rate: Number(g.success_rate ?? 0),
+ validation_passed: Boolean(g.validation_passed),
+ waiting_since: String(g.waiting_since ?? ''),
+ },
+ activeAgentTab: 'orchestration',
+ })
+ }
+ } catch {
+ /* ignore */
+ }
+ },
 }))

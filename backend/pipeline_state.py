@@ -33,6 +33,8 @@ class PipelineState:
         self.reconciliation: Optional[Dict[str, Any]] = None
         self.current_dataset_id: str = ""
         self.pending_reviews: list[Dict[str, Any]] = []
+        # Same payload as WebSocket APPROVAL_GATE — kept for reconnect / REST so UI is not WS-only.
+        self.approval_gate: Optional[Dict[str, Any]] = None
         self._lock: asyncio.Lock = asyncio.Lock()
         self._agent_lock: threading.Lock = threading.Lock()
 
@@ -69,15 +71,25 @@ class PipelineState:
         async with self._lock:
             self.current_stage = stage
 
+    async def set_approval_gate(self, data: Dict[str, Any]) -> None:
+        async with self._lock:
+            self.approval_gate = dict(data)
+
+    async def clear_approval_gate(self) -> None:
+        async with self._lock:
+            self.approval_gate = None
+
     async def approve(self) -> None:
         async with self._lock:
             self.approved = True
+            self.approval_gate = None
         self.approval_event.set()
 
     async def halt(self) -> None:
         async with self._lock:
             self.halted = True
             self.current_stage = Stage.HALTED
+            self.approval_gate = None
         self.approval_event.set()
         self.review_event.set()
 
@@ -98,6 +110,7 @@ class PipelineState:
             self.halted = False
             self.drift_confirm_event.clear()
             self.pending_reviews = []
+            self.approval_gate = None
 
     async def set_pending_reviews(self, reviews: list[Dict[str, Any]]) -> None:
         async with self._lock:
@@ -154,6 +167,7 @@ class PipelineState:
             "stage_statuses": self.stage_statuses,
             "halted": self.halted,
             "pending_reviews": self.pending_reviews,
+            "approval_gate": self.approval_gate,
         }
 
 

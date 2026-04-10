@@ -7,7 +7,7 @@ const STEPS: Step[] = [
   { id: 'EXTRACT',           num: 1, label: 'Extract',    agent: 'Discovery Agent'       },
   { id: 'TRANSFORM',         num: 2, label: 'Transform',  agent: 'Transformation Agent'  },
   { id: 'VALIDATE',          num: 3, label: 'Validate',   agent: 'Orchestration Agent'   },
-  { id: 'AWAITING_APPROVAL', num: 4, label: 'Approval',   agent: 'Human Gate'            },
+  { id: 'AWAITING_APPROVAL', num: 4, label: 'Approval',   agent: 'Final FHIR load'       },
   { id: 'LOAD',              num: 5, label: 'Load FHIR',  agent: 'Orchestration Agent'   },
   { id: 'RECONCILE',         num: 6, label: 'Reconcile',  agent: 'QA Agent'              },
 ]
