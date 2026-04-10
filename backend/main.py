@@ -17,7 +17,7 @@ from websocket_manager import ws_manager
 from agents.orchestration_agent import run_pipeline
 from agents.monitor_agent import start_monitor
 from fhir_store import ensure_tables, clear_resources, list_run_summaries, get_run_summary, list_records, retry_failed_records
-from run_store import create_run as _create_run, is_pipeline_running
+from run_store import create_run as _create_run, is_pipeline_running, clear_stale_runs
 
 settings = get_settings()
 app = FastAPI(title="Brightcone Migration Platform", version="3.0.0")
@@ -511,4 +511,28 @@ async def get_run_data_view(run_id: str, table: str = "", limit: int = 20):
 @app.on_event("startup")
 async def startup():
     ensure_tables()
+    fixed = clear_stale_runs()
+    if fixed:
+        print(f"[startup] Marked {fixed} stale running run(s) as failed")
     asyncio.create_task(start_monitor())
+
+
+@app.post("/api/pipeline/clear-stuck")
+async def clear_stuck_runs():
+    """Force-fail any runs stuck in 'running' state (for ops recovery)."""
+    fixed = clear_stale_runs()
+    # Also force-fail runs with NO time limit if any remain (e.g. from recent crash)
+    from run_store import _get_conn
+    with _get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("""
+            UPDATE migration_runs
+            SET status = 'failed', completed_at = NOW(),
+                notes = 'Force-failed via admin endpoint'
+            WHERE status LIKE 'running%'
+        """)
+        forced = cur.rowcount
+        cur.close()
+    pipeline_state.current_stage = Stage.IDLE
+    pipeline_state.run_id = None
+    return JSONResponse({"stale_cleared": fixed, "force_cleared": forced})

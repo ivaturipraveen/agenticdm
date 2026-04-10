@@ -25,13 +25,34 @@ def _get_conn():
 
 
 def is_pipeline_running() -> bool:
-    """Returns True if any run has status 'running' or 'running:*' in the DB."""
+    """Returns True if any run started within the last hour has status 'running'."""
     with _get_conn() as conn:
         cur = conn.cursor()
-        cur.execute("SELECT 1 FROM migration_runs WHERE status LIKE 'running%' LIMIT 1")
+        cur.execute("""
+            SELECT 1 FROM migration_runs
+            WHERE status LIKE 'running%'
+              AND started_at > NOW() - INTERVAL '1 hour'
+            LIMIT 1
+        """)
         result = cur.fetchone()
         cur.close()
     return result is not None
+
+
+def clear_stale_runs() -> int:
+    """Mark any running rows older than 1 hour as failed. Returns count fixed."""
+    with _get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("""
+            UPDATE migration_runs
+            SET status = 'failed', completed_at = NOW(),
+                notes = 'Auto-failed: process crashed or server restarted'
+            WHERE status LIKE 'running%'
+              AND started_at <= NOW() - INTERVAL '1 hour'
+        """)
+        count = cur.rowcount
+        cur.close()
+    return count
 
 
 def create_run(run_id: str, dataset_id: str) -> None:
