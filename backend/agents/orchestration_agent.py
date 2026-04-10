@@ -9,7 +9,7 @@ from pipeline_state import pipeline_state, Stage
 from config import get_settings
 from agents.transformation_agent import transform_batch
 from agents.qa_agent import run_reconciliation
-from run_store import create_run, update_run_stage, complete_run, fail_run, save_agent_output
+from run_store import update_run_stage, complete_run, fail_run, save_agent_output
 import fhir_client
 from fhir_store import save_resources, log_endpoint_call
 
@@ -64,7 +64,6 @@ async def _log(run_id: str, agent: str, action: str, status: str, records: int =
 async def run_pipeline() -> None:
     run_id = await pipeline_state.start_run()
     ds_id = getattr(pipeline_state, 'current_dataset_id', '') or ''
-    create_run(run_id, ds_id)
 
     pipeline_state.update_agent("orchestration", "running", "Pipeline initiated")
     await ws_manager.send_agent_status("orchestration", "running", "Pipeline initiated", 0)

@@ -17,9 +17,11 @@ from websocket_manager import ws_manager
 from agents.orchestration_agent import run_pipeline
 from agents.monitor_agent import start_monitor
 from fhir_store import ensure_tables, clear_resources, list_run_summaries, get_run_summary, list_records, retry_failed_records
+from run_store import create_run as _create_run, is_pipeline_running
 
 settings = get_settings()
 app = FastAPI(title="Brightcone Migration Platform", version="3.0.0")
+_pipeline_lock = asyncio.Lock()
 
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True,
                    allow_methods=["*"], allow_headers=["*"])
@@ -215,21 +217,27 @@ async def dataset_preview(dataset_id: str):
 
 @app.post("/api/pipeline/start")
 async def start_pipeline(background_tasks: BackgroundTasks, dataset_id: str = "default"):
+    # In-process check (fast)
+    if _pipeline_lock.locked():
+        return JSONResponse({"error": "Pipeline already running"}, status_code=409)
     if pipeline_state.current_stage not in (Stage.IDLE, Stage.COMPLETE, Stage.HALTED):
         return JSONResponse({"error": "Pipeline already running", "stage": pipeline_state.current_stage.value}, status_code=409)
-    pipeline_state.current_dataset_id = dataset_id
-    for agent in pipeline_state.agent_statuses:
-        if agent != "monitor":
-            pipeline_state.agent_statuses[agent] = {"status": "idle", "last_action": "", "records_processed": 0, "last_active": None}
+    # Cross-process DB check (guards against multiple Render instances)
+    if is_pipeline_running():
+        return JSONResponse({"error": "Pipeline already running on another instance"}, status_code=409)
 
     async def _run():
-        from agents.discovery_agent import run_discovery
-        from run_store import create_run as _create_run
-        pre_run_id = str(uuid.uuid4())
-        pipeline_state.run_id = pre_run_id
-        _create_run(pre_run_id, dataset_id)
-        await run_discovery()
-        await run_pipeline()
+        async with _pipeline_lock:
+            from agents.discovery_agent import run_discovery
+            pipeline_state.current_dataset_id = dataset_id
+            for agent in pipeline_state.agent_statuses:
+                if agent != "monitor":
+                    pipeline_state.agent_statuses[agent] = {"status": "idle", "last_action": "", "records_processed": 0, "last_active": None}
+            pre_run_id = str(uuid.uuid4())
+            pipeline_state.run_id = pre_run_id
+            _create_run(pre_run_id, dataset_id)
+            await run_discovery()
+            await run_pipeline()
 
     background_tasks.add_task(_run)
     return JSONResponse({"status": "started", "dataset_id": dataset_id})

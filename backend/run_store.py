@@ -24,6 +24,16 @@ def _get_conn():
         conn.close()
 
 
+def is_pipeline_running() -> bool:
+    """Returns True if any run has status 'running' or 'running:*' in the DB."""
+    with _get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT 1 FROM migration_runs WHERE status LIKE 'running%' LIMIT 1")
+        result = cur.fetchone()
+        cur.close()
+    return result is not None
+
+
 def create_run(run_id: str, dataset_id: str) -> None:
     with _get_conn() as conn:
         cur = conn.cursor()
@@ -31,6 +41,7 @@ def create_run(run_id: str, dataset_id: str) -> None:
             INSERT INTO migration_runs
               (run_id, dataset_id, dataset_name, started_at, status)
             VALUES (%s, %s, %s, NOW(), 'running')
+            ON CONFLICT (run_id) DO NOTHING
         """, (run_id, dataset_id, dataset_id.replace('_', ' ').title()))
         cur.close()
 
