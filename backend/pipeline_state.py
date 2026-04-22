@@ -90,8 +90,18 @@ class PipelineState:
             self.halted = True
             self.current_stage = Stage.HALTED
             self.approval_gate = None
+            current_run_id = self.run_id
         self.approval_event.set()
         self.review_event.set()
+        # Mark the current DB run as failed so future starts are not blocked.
+        # is_pipeline_running() looks at migration_runs.status LIKE 'running%';
+        # leaving it 'running' would 409 every restart for up to an hour.
+        if current_run_id:
+            try:
+                from run_store import fail_run
+                fail_run(current_run_id, "Halted by operator")
+            except Exception as e:
+                print(f"[pipeline_state.halt] fail_run error (non-critical): {e}")
 
     async def confirm_drift(self) -> None:
         async with self._lock:
@@ -100,6 +110,7 @@ class PipelineState:
 
     async def reset(self) -> None:
         async with self._lock:
+            prior_run_id = self.run_id
             self.current_stage = Stage.IDLE
             self.run_id = None
             self.start_time = None
@@ -111,6 +122,15 @@ class PipelineState:
             self.drift_confirm_event.clear()
             self.pending_reviews = []
             self.approval_gate = None
+        # Force-fail the prior run AND any other stuck 'running' rows so that
+        # is_pipeline_running() no longer blocks the next start.
+        try:
+            from run_store import fail_run, force_fail_all_running
+            if prior_run_id:
+                fail_run(prior_run_id, "Reset by operator")
+            force_fail_all_running("Force-failed via pipeline reset")
+        except Exception as e:
+            print(f"[pipeline_state.reset] cleanup error (non-critical): {e}")
 
     async def set_pending_reviews(self, reviews: list[Dict[str, Any]]) -> None:
         async with self._lock:

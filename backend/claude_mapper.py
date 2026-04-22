@@ -20,6 +20,27 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
+# Process-wide circuit breaker: once we see an auth error (invalid API key) we
+# stop attempting further Claude calls for the rest of the process lifetime.
+# Prevents burning 5-15s of dead time per pipeline run when the key is bad.
+_AUTH_FAILED: bool = False
+
+
+def _is_auth_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return (
+        "401" in msg
+        or "invalid x-api-key" in msg
+        or "authentication_error" in msg
+        or "invalid api key" in msg
+    )
+
+
+def reset_auth_breaker() -> None:
+    """Clear the auth circuit breaker (e.g. after rotating the key)."""
+    global _AUTH_FAILED
+    _AUTH_FAILED = False
+
 # FHIR R4 field catalog — passed to Claude as context so it knows
 # valid target paths. Claude does NOT hardcode guesses; it reasons
 # against actual column names and sample values.
@@ -215,6 +236,10 @@ def ai_map_table(
 
     Returns None if the call fails (caller should fall back to fuzzy matching).
     """
+    global _AUTH_FAILED
+    if _AUTH_FAILED:
+        # Earlier call in this process already hit a 401 — skip straight to fallback.
+        return None
     try:
         # Filter out operational columns before sending to Claude
         mapped_columns = [c for c in columns if c["name"].lower() not in IGNORE_COLUMNS]
@@ -252,7 +277,15 @@ def ai_map_table(
         return result
 
     except Exception as e:
-        logger.warning("[claude_mapper] Failed for table '%s': %s — falling back to fuzzy matching", table_name, e)
+        if _is_auth_error(e):
+            _AUTH_FAILED = True
+            logger.warning(
+                "[claude_mapper] Auth error for table '%s' (ANTHROPIC_API_KEY invalid). "
+                "Disabling Claude calls for remainder of process; using fuzzy matching: %s",
+                table_name, e,
+            )
+        else:
+            logger.warning("[claude_mapper] Failed for table '%s': %s — falling back to fuzzy matching", table_name, e)
         return None
 
 

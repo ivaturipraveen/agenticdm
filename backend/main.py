@@ -17,7 +17,7 @@ from websocket_manager import ws_manager
 from agents.orchestration_agent import run_pipeline
 from agents.monitor_agent import start_monitor
 from fhir_store import ensure_tables, clear_resources, list_run_summaries, get_run_summary, list_records, retry_failed_records
-from run_store import create_run as _create_run, is_pipeline_running, clear_stale_runs
+from run_store import create_run as _create_run, is_pipeline_running, clear_stale_runs, force_fail_all_running
 
 settings = get_settings()
 app = FastAPI(title="Brightcone Migration Platform", version="3.0.0")
@@ -223,10 +223,19 @@ async def start_pipeline(dataset_id: str = "default"):
     if _pipeline_lock.locked():
         return JSONResponse({"error": "Pipeline already running"}, status_code=409)
     if pipeline_state.current_stage not in (Stage.IDLE, Stage.COMPLETE, Stage.HALTED):
-        return JSONResponse({"error": "Pipeline already running", "stage": pipeline_state.current_stage.value}, status_code=409)
-    # Cross-process DB check (guards against multiple Render instances)
+        return JSONResponse(
+            {
+                "error": "Pipeline already running",
+                "stage": pipeline_state.current_stage.value,
+                "hint": "POST /api/pipeline/reset to force-clear the current run.",
+            },
+            status_code=409,
+        )
+    # Cross-process DB check: if in-memory says IDLE but DB still has a
+    # 'running' row from a crashed process, force-clear it instead of 409-ing.
     if is_pipeline_running():
-        return JSONResponse({"error": "Pipeline already running on another instance"}, status_code=409)
+        cleared = force_fail_all_running("Auto-cleared before fresh start (stale DB run)")
+        print(f"[start_pipeline] force-cleared {cleared} stuck run(s) before starting {dataset_id}")
 
     async def _run():
         async with _pipeline_lock:
@@ -543,9 +552,12 @@ async def get_run_data_view(run_id: str, table: str = "", limit: int = 20):
 @app.on_event("startup")
 async def startup():
     ensure_tables()
-    fixed = clear_stale_runs()
-    if fixed:
-        print(f"[startup] Marked {fixed} stale running run(s) as failed")
+    # Single-instance service: any 'running%' row at startup is from a dead
+    # process. Force-fail all of them so new pipeline starts are never
+    # blocked after a Render restart / deploy / crash.
+    forced = force_fail_all_running("Auto-failed on server startup")
+    if forced:
+        print(f"[startup] Force-failed {forced} stuck running run(s) from previous process")
     asyncio.create_task(start_monitor())
 
 

@@ -25,13 +25,18 @@ def _get_conn():
 
 
 def is_pipeline_running() -> bool:
-    """Returns True if any run started within the last hour has status 'running'."""
+    """Returns True if any run started within the last 15 minutes has status 'running'.
+
+    Shortened from 1 hour to 15 minutes: a real pipeline completes in <5 min, so
+    anything older than 15 min is certainly a crashed or abandoned run and must
+    not block new starts.
+    """
     with _get_conn() as conn:
         cur = conn.cursor()
         cur.execute("""
             SELECT 1 FROM migration_runs
             WHERE status LIKE 'running%'
-              AND started_at > NOW() - INTERVAL '1 hour'
+              AND started_at > NOW() - INTERVAL '15 minutes'
             LIMIT 1
         """)
         result = cur.fetchone()
@@ -40,7 +45,7 @@ def is_pipeline_running() -> bool:
 
 
 def clear_stale_runs() -> int:
-    """Mark any running rows older than 1 hour as failed. Returns count fixed."""
+    """Mark running rows older than 15 minutes as failed. Returns count fixed."""
     with _get_conn() as conn:
         cur = conn.cursor()
         cur.execute("""
@@ -48,8 +53,26 @@ def clear_stale_runs() -> int:
             SET status = 'failed', completed_at = NOW(),
                 notes = 'Auto-failed: process crashed or server restarted'
             WHERE status LIKE 'running%'
-              AND started_at <= NOW() - INTERVAL '1 hour'
+              AND started_at <= NOW() - INTERVAL '15 minutes'
         """)
+        count = cur.rowcount
+        cur.close()
+    return count
+
+
+def force_fail_all_running(note: str = "Force-failed on startup") -> int:
+    """Mark every 'running%' row as failed regardless of age.
+
+    Used on process startup (Render restart) and on operator reset to guarantee
+    the pipeline can start fresh. Safe because this service is single-instance.
+    """
+    with _get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("""
+            UPDATE migration_runs
+            SET status = 'failed', completed_at = NOW(), notes = %s
+            WHERE status LIKE 'running%%'
+        """, (note[:500],))
         count = cur.rowcount
         cur.close()
     return count
