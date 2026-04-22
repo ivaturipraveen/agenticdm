@@ -58,15 +58,31 @@ def _build_source_checksums(
     field_mappings: List[Dict[str, Any]],
 ) -> Dict[str, str]:
     """
-    Build checksums of source values for each auto-mapped column.
-    Returns: { source_column → checksum_of_values }
+    Build checksums of source values after applying the SAME deterministic
+    transformation the Transformation Agent applied when writing to FHIR.
+    Without this, every check would fail: raw "M001" vs Patient/<uuid>,
+    raw Decimal('450.00') vs float 450.0, raw datetime(...) vs "2024-01-15".
+    The post-load integrity check is only meaningful if we compare
+    "what FHIR SHOULD contain" (source after classify_value) with
+    "what FHIR actually contains".
     """
+    from dynamic_fhir_engine import classify_value
     result = {}
-    auto_mapped = [f for f in field_mappings if f.get("status") == "auto_mapped" and f.get("source_column")]
+    auto_mapped = [f for f in field_mappings if f.get("status") == "auto_mapped" and f.get("source_column") and f.get("target_field")]
     for mapping in auto_mapped:
         col = mapping["source_column"]
-        values = [r.get(col) for r in source_rows]
-        result[col] = _checksum_values(values)
+        target = str(mapping["target_field"])
+        transformed = []
+        for r in source_rows:
+            v = r.get(col)
+            if v is None:
+                transformed.append(None)
+                continue
+            try:
+                transformed.append(classify_value(target, col, v))
+            except Exception:
+                transformed.append(v)
+        result[col] = _checksum_values(transformed)
     return result
 
 

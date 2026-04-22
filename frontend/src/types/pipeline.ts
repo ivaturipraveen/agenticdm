@@ -30,6 +30,16 @@ export interface AgentState {
  reasoning: ReasoningStep[]
 }
 
+export interface TableChecksumResult {
+ resource_type: string
+ source_count: number
+ fhir_count: number
+ count_match: boolean
+ field_checksums: Record<string, boolean>
+ fields_checked: number
+ fields_passing: number
+}
+
 export interface ReconciliationReport {
  source_count: number
  target_count: number
@@ -38,11 +48,10 @@ export interface ReconciliationReport {
  mismatched: number
  missing: number
  violations: number
- checksum_member_id: boolean
- checksum_claim_amount: boolean
- checksum_date_of_service: boolean
  anomalies_quarantined: number
  generated_at: string
+ checksum_results?: Record<string, TableChecksumResult>
+ completeness_by_type?: Record<string, { total: number; valid: number; violations: number; violation_rate?: number; error_breakdown?: Record<string, number> }>
 }
 
 export interface ColumnChange {

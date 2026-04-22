@@ -376,11 +376,9 @@ function QAView() {
  )
  const match = reconciliation.match_pct
  const matchColor = match >= 99 ? 'text-emerald-700' : match >= 90 ? 'text-amber-700' : 'text-red-700'
- const checks = [
- { label: 'member_id integrity', ok: reconciliation.checksum_member_id },
- { label: 'claim_amount integrity', ok: reconciliation.checksum_claim_amount },
- { label: 'date_of_service integrity', ok: reconciliation.checksum_date_of_service },
- ]
+ const checksumResults = reconciliation.checksum_results || {}
+ const tableEntries = Object.entries(checksumResults)
+
  return (
  <div className="space-y-5">
  {/* Hero comparison */}
@@ -404,21 +402,57 @@ function QAView() {
  </div>
  </div>
  </div>
- {/* Status bar */}
+ {/* Per-table integrity */}
  <div className="rounded-2xl border border-slate-200 bg-white shadow-sm overflow-hidden">
- <div className="px-5 py-3 border-b border-slate-200 bg-slate-50 text-sm font-bold text-slate-900">Data Integrity Checks</div>
- <div className="divide-y divide-slate-100">
- {checks.map(c => (
- <div key={c.label} className="flex items-center justify-between px-5 py-4">
- <div>
- <div className="text-sm font-medium text-slate-900">{c.label}</div>
- <div className="text-xs text-slate-500 mt-0.5">{c.ok ? 'Source and FHIR values match' : 'Mismatch detected between source and FHIR'}</div>
+ <div className="px-5 py-3 border-b border-slate-200 bg-slate-50 flex items-center justify-between">
+ <div className="text-sm font-bold text-slate-900">Data Integrity Checks</div>
+ <div className="text-xs text-slate-500">Verifies each source row made it into FHIR with the expected transformation applied.</div>
  </div>
- <span className={clsx('px-3 py-1.5 rounded-xl text-xs font-bold', c.ok ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700')}>
- {c.ok ? 'PASS' : 'FAIL'}
+ {tableEntries.length === 0 ? (
+ <div className="px-5 py-6 text-sm text-slate-500">No per-table checksum data reported.</div>
+ ) : (
+ <div className="divide-y divide-slate-100">
+ {tableEntries.map(([table, res]) => {
+ const countOk = res.count_match
+ const fieldsOk = res.fields_checked === 0 ? true : res.fields_passing === res.fields_checked
+ const overallOk = countOk && fieldsOk
+ const failingFields = Object.entries(res.field_checksums || {}).filter(([, ok]) => !ok).map(([k]) => k)
+ return (
+ <div key={table} className="px-5 py-4">
+ <div className="flex items-center justify-between gap-3">
+ <div className="min-w-0">
+ <div className="text-sm font-semibold text-slate-900">{table} <span className="text-slate-400">→</span> {res.resource_type}</div>
+ <div className="text-xs text-slate-500 mt-0.5">
+ {res.source_count.toLocaleString()} source rows → {res.fhir_count.toLocaleString()} FHIR resources ·
+ {' '}{res.fields_passing}/{res.fields_checked} field checksums match
+ </div>
+ </div>
+ <span className={clsx('px-3 py-1.5 rounded-xl text-xs font-bold shrink-0', overallOk ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700')}>
+ {overallOk ? 'PASS' : 'FAIL'}
  </span>
  </div>
- ))}
+ {!overallOk && (
+ <div className="mt-2 text-xs text-red-700 leading-relaxed">
+ {!countOk && <div>Row count mismatch — expected {res.source_count}, loaded {res.fhir_count}.</div>}
+ {failingFields.length > 0 && <div>Fields differing from source: <span className="font-mono">{failingFields.join(', ')}</span></div>}
+ </div>
+ )}
+ </div>
+ )
+ })}
+ </div>
+ )}
+ </div>
+ {/* How to read this */}
+ <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+ <div className="text-sm font-semibold text-slate-900 mb-2">How to read this check</div>
+ <div className="text-sm text-slate-600 leading-relaxed">
+ Each check hashes the source values after applying the same transformation
+ the Transformation Agent applied (IDs normalized to stable UUIDs, dates
+ normalized to ISO-8601, amounts normalized to numeric). A <span className="font-semibold text-emerald-700">PASS</span> means
+ every source value is present in the FHIR output with the expected shape.
+ A <span className="font-semibold text-red-700">FAIL</span> means a specific field diverged — the failing field names
+ are listed above so you know exactly where to look.
  </div>
  </div>
  {/* Anomalies */}
@@ -500,10 +534,15 @@ export default function MigrationView({ onGoHome }: { onGoHome?: () => void } = 
  const schemaMapping = usePipelineStore((s) => s.schemaMapping)
  const reconciliation = usePipelineStore((s) => s.reconciliation)
  const migrationSummary = usePipelineStore((s) => s.migrationSummary) as any
+ const pendingReviewCount = usePipelineStore((s) => s.pendingReviews.length)
  const isDone = stage === 'COMPLETE' || stage === 'HALTED'
  const active = AGENTS.find(a => a.id === activeTab) || AGENTS[0]
  const activeState = agents[active.id]
  const palette = COLOR[active.color]
+ // While the operator is actively resolving field reviews, keep the main
+ // panel clear: the activity footer eats ~200px and can cover the last
+ // review card's Accept / Edit / Reject buttons.
+ const inReviewFlow = pendingReviewCount > 0 && (stage === 'TRANSFORM' || stage === 'VALIDATE' || stage === 'AWAITING_APPROVAL')
 
  const content = useMemo(() => {
  switch (active.id) {
@@ -601,10 +640,12 @@ export default function MigrationView({ onGoHome }: { onGoHome?: () => void } = 
  </div>
 
  {/* Content */}
- <div className="flex-1 overflow-y-auto space-y-5 pr-0.5">{content}</div>
+ <div className="flex-1 overflow-y-auto space-y-5 pr-0.5 pb-24">{content}</div>
 
- {/* Activity footer: what happened + next step */}
- {completedStages.length > 0 && !isDone && (
+ {/* Activity footer: what happened + next step.
+  * Hidden while the operator is resolving field mapping reviews so the
+  * Accept / Edit / Reject buttons on the last card are never clipped. */}
+ {completedStages.length > 0 && !isDone && !inReviewFlow && (
  <div className="mt-3 rounded-2xl border border-slate-200 bg-white shadow-sm overflow-hidden shrink-0">
  <div className="px-4 py-2.5 border-b border-slate-100 bg-slate-50 text-xs font-bold text-slate-600 uppercase tracking-wider">Activity — What has been confirmed so far</div>
  <div className="divide-y divide-slate-100">

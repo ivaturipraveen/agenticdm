@@ -146,7 +146,12 @@ async def run_pipeline() -> None:
 
         total_transformed = sum(len(v) for v in all_transformed_resources.values())
         await pipeline_state.set_pending_reviews(all_review_items)
-        await ws_manager.broadcast("REVIEWS_UPDATED", {"pending_reviews": pipeline_state.pending_reviews, "schema_mapping": pipeline_state.schema_mapping})
+        # Only broadcast reviews that still need an operator decision.
+        _unresolved = [
+            r for r in pipeline_state.pending_reviews
+            if r.get("review_decision") not in ("accept", "reject", "edit")
+        ]
+        await ws_manager.broadcast("REVIEWS_UPDATED", {"pending_reviews": _unresolved, "schema_mapping": pipeline_state.schema_mapping})
         await ws_manager.send_reasoning(
             "orchestration", f"Transform complete - {total_transformed:,} FHIR resources generated",
             f"Review items: {len(all_review_items)}, Validation failures: {len(all_validation_errors)}",

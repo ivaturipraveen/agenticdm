@@ -257,7 +257,23 @@ async def start_pipeline(dataset_id: str = "default"):
 
 @app.get("/api/pipeline/reviews")
 async def get_reviews():
-    return JSONResponse({"pending_reviews": pipeline_state.pending_reviews})
+    return JSONResponse({"pending_reviews": _unresolved_reviews()})
+
+
+_RESOLVED_DECISIONS = {"accept", "reject", "edit"}
+
+
+def _unresolved_reviews() -> list:
+    """Only items the operator has not yet decided on.
+
+    pipeline_state.pending_reviews keeps every item (even decided ones) so the
+    pipeline can audit decisions later, but the UI should only display items
+    that still need action.
+    """
+    return [
+        r for r in pipeline_state.pending_reviews
+        if r.get("review_decision") not in _RESOLVED_DECISIONS
+    ]
 
 
 @app.post("/api/pipeline/reviews/resolve")
@@ -266,11 +282,15 @@ async def resolve_review(payload: dict):
     source_column = payload.get("source_column")
     decision = payload.get("decision")
     selected_target = payload.get("selected_target")
-    if not table or not source_column or decision not in {"accept", "reject", "edit"}:
+    if not table or not source_column or decision not in _RESOLVED_DECISIONS:
         return JSONResponse({"error": "Invalid review payload"}, status_code=400)
     await pipeline_state.resolve_review(table, source_column, decision, selected_target)
-    await ws_manager.broadcast("REVIEWS_UPDATED", {"pending_reviews": pipeline_state.pending_reviews, "schema_mapping": pipeline_state.schema_mapping})
-    return JSONResponse({"status": "ok", "pending_reviews": pipeline_state.pending_reviews})
+    unresolved = _unresolved_reviews()
+    await ws_manager.broadcast(
+        "REVIEWS_UPDATED",
+        {"pending_reviews": unresolved, "schema_mapping": pipeline_state.schema_mapping},
+    )
+    return JSONResponse({"status": "ok", "pending_reviews": unresolved})
 
 
 @app.post("/api/pipeline/approve")
