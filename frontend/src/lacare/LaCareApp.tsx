@@ -29,7 +29,7 @@ const TABS: { id: Tab; label: string }[] = [
   { id: 'pipeline', label: 'Agentic Pipeline' },
   { id: 'evidence', label: 'HEDIS Evidence' },
   { id: 'documents', label: 'Documents' },
-  { id: 'beforeafter', label: 'Raw vs Extracted' },
+  { id: 'beforeafter', label: 'Tutorial: Raw XML vs Extracted' },
 ]
 
 export default function LaCareApp({ onExitToLauncher, userLabel }: Props) {

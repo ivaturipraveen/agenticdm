@@ -3,12 +3,45 @@ import { getSample, LaCareHit } from '../api'
 import { MEASURE_GLOSSARY } from '../glossary'
 import { Acronym } from '../HelpTip'
 
+// Each option is a fully self-contained teaching example: short label for
+// the dropdown + one-line plain-English description of what the canned
+// CCDA demonstrates. Keeps the option list readable for non-technical users.
 const SCENARIOS = [
-  { value: 'FUM_CLOSED', label: 'FUM — ED → BH follow-up (7-day)', measure: 'FUM' },
-  { value: 'FUA_CLOSED', label: 'FUA — ED → AOD follow-up', measure: 'FUA' },
-  { value: 'CBP_CONTROLLED', label: 'CBP — BP controlled', measure: 'CBP' },
-  { value: 'HBD_CONTROLLED', label: 'HBD — HbA1c controlled', measure: 'HBD' },
-  { value: 'MRP_CLOSED', label: 'MRP — medication reconciliation', measure: 'MRP' },
+  {
+    value: 'FUM_CLOSED',
+    label: 'Example 1 — Mental-health follow-up after an ER visit (FUM)',
+    short: 'Mental-health follow-up (FUM)',
+    hint: 'A member was seen in the ER for depression, then had a behavioral-health follow-up visit within 7 days.',
+    measure: 'FUM',
+  },
+  {
+    value: 'FUA_CLOSED',
+    label: 'Example 2 — Substance-use follow-up after an ER visit (FUA)',
+    short: 'Substance-use follow-up (FUA)',
+    hint: 'A member was seen in the ER for alcohol or drug use, then had a follow-up visit within 30 days.',
+    measure: 'FUA',
+  },
+  {
+    value: 'CBP_CONTROLLED',
+    label: 'Example 3 — Blood-pressure controlled for a hypertension patient (CBP)',
+    short: 'Controlled blood pressure (CBP)',
+    hint: 'A member with high blood pressure has a recent reading below 140/90 mmHg.',
+    measure: 'CBP',
+  },
+  {
+    value: 'HBD_CONTROLLED',
+    label: 'Example 4 — Diabetes well-controlled (HbA1c ≤ 9 %) (HBD)',
+    short: 'Controlled diabetes (HBD)',
+    hint: 'A member with diabetes has a recent HbA1c lab result at or below 9 %.',
+    measure: 'HBD',
+  },
+  {
+    value: 'MRP_CLOSED',
+    label: 'Example 5 — Medication list reviewed after hospital discharge (MRP)',
+    short: 'Medication reconciliation (MRP)',
+    hint: 'A member\'s medications were reviewed within 30 days of leaving the hospital.',
+    measure: 'MRP',
+  },
 ]
 
 interface SampleState {
@@ -28,26 +61,51 @@ export default function BeforeAfterTab() {
     getSample(scenario).then(setData).finally(() => setLoading(false))
   }, [scenario])
 
+  const selected = SCENARIOS.find(x => x.value === scenario)
+
   return (
     <div className="p-8 max-w-[1500px] mx-auto">
+      {/* Big, unmissable banner so no one mistakes this for their own run output */}
+      <div className="mb-5 rounded-xl border-l-4 border-amber-400 bg-amber-50 px-4 py-3 flex items-start gap-3">
+        <span className="shrink-0 inline-flex h-6 w-6 items-center justify-center rounded-full bg-amber-400 text-white text-[11px] font-bold">i</span>
+        <div className="text-[12px] leading-relaxed text-amber-900">
+          <div className="font-semibold">This page is a tutorial — it does NOT show data from your runs.</div>
+          Every time you pick an example below, a canned demo document is generated on the fly to
+          show you <em>what the same clinical fact looks like as raw XML vs. clean structured data</em>.
+          To see this side-by-side view for <strong>real documents you have processed</strong>, go to
+          the <strong>Documents</strong> tab and click any row.
+        </div>
+      </div>
+
       <div className="mb-4 flex items-start justify-between gap-4 flex-wrap">
         <div>
-          <h1 className="text-2xl font-semibold text-slate-900">Raw <Acronym>CDA</Acronym> vs Extracted Data</h1>
-          <p className="text-sm text-slate-500 mt-1 max-w-2xl">
-            Tutorial view: pick a <Acronym>HEDIS</Acronym> measure and we'll generate a canned <Acronym>C-CDA</Acronym> that demonstrates
-            what that measure looks like as raw XML vs. the clean structured facts the pipeline pulls
-            out. <strong>This is a teaching view</strong> — not tied to any of your processed runs.
+          <div className="flex items-center gap-2">
+            <span className="px-2 py-0.5 rounded-md bg-amber-100 border border-amber-300 text-amber-800 text-[10px] font-bold uppercase tracking-widest">Tutorial</span>
+            <h1 className="text-2xl font-semibold text-slate-900">Raw XML vs Extracted Data</h1>
+          </div>
+          <p className="text-sm text-slate-500 mt-2 max-w-2xl">
+            Five canned clinical examples. Each one shows you what a <Acronym>HEDIS</Acronym> quality
+            measure looks like inside a raw <Acronym>C-CDA</Acronym> XML document (on the left) and what
+            the pipeline pulls out of it as structured facts (on the right). Use it to train new
+            reviewers or to walk a client through the data flow.
           </p>
         </div>
-        <label className="flex items-center gap-2" title="Each option is a different HEDIS quality measure. Pick one to load a canned CCDA demonstrating how that measure looks in XML vs. structured extraction.">
-          <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">HEDIS measure</span>
+        <label className="flex flex-col items-start gap-1" title="Pick a clinical example to load. Each one demonstrates a different HEDIS quality measure end-to-end: raw C-CDA XML on the left, extracted facts on the right.">
+          <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">
+            Pick an example to walk through
+          </span>
           <select
             value={scenario}
             onChange={e => setScenario(e.target.value)}
-            className="px-3.5 py-2 rounded-xl border border-slate-200 text-sm bg-white"
+            className="px-3.5 py-2 rounded-xl border border-slate-300 text-sm bg-white min-w-[420px] font-medium"
           >
             {SCENARIOS.map(s => <option key={s.value} value={s.value}>{s.label}</option>)}
           </select>
+          {selected && (
+            <span className="text-[11px] text-slate-500 leading-snug max-w-[420px]">
+              {selected.hint}
+            </span>
+          )}
         </label>
       </div>
 
@@ -78,12 +136,17 @@ export default function BeforeAfterTab() {
         <>
           <div className="grid lg:grid-cols-2 gap-5 mb-6">
             <div className="rounded-2xl border border-slate-200 bg-slate-950 overflow-hidden">
-              <div className="flex items-center justify-between px-4 py-2.5 bg-slate-900 border-b border-slate-800">
-                <div className="flex items-center gap-2 text-xs text-slate-400 font-mono">
-                  <span className="h-2.5 w-2.5 rounded-full bg-red-400" />
-                  Raw C-CDA XML
+              <div className="px-4 py-2.5 bg-slate-900 border-b border-slate-800">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2 text-xs text-slate-200 font-semibold">
+                    <span className="h-2.5 w-2.5 rounded-full bg-red-400" />
+                    INPUT — Raw C-CDA XML
+                  </div>
+                  <span className="text-[10px] text-slate-500 font-mono">{data.xml.length.toLocaleString()} chars · HL7 v3</span>
                 </div>
-                <span className="text-[10px] text-slate-500 font-mono">{data.xml.length.toLocaleString()} chars · HL7 v3</span>
+                <div className="text-[10px] text-slate-400 mt-0.5">
+                  What the provider's EHR sends us — hard for a human to read.
+                </div>
               </div>
               <pre className="p-4 text-[11px] text-slate-300 font-mono overflow-auto max-h-[560px] leading-relaxed">
 {data.xml}
@@ -91,12 +154,17 @@ export default function BeforeAfterTab() {
             </div>
 
             <div className="rounded-2xl border border-slate-200 bg-white overflow-hidden">
-              <div className="flex items-center justify-between px-4 py-2.5 bg-rose-50 border-b border-rose-100">
-                <div className="flex items-center gap-2 text-xs text-rose-700 font-semibold">
-                  <span className="h-2.5 w-2.5 rounded-full bg-emerald-500" />
-                  Extracted Clinical Data
+              <div className="px-4 py-2.5 bg-rose-50 border-b border-rose-100">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2 text-xs text-rose-700 font-semibold">
+                    <span className="h-2.5 w-2.5 rounded-full bg-emerald-500" />
+                    OUTPUT — Extracted Clinical Data
+                  </div>
+                  <span className="text-[10px] text-slate-500 font-mono">Brightcone structured output</span>
                 </div>
-                <span className="text-[10px] text-slate-500 font-mono">Brightcone structured output</span>
+                <div className="text-[10px] text-slate-500 mt-0.5">
+                  What the pipeline produces — clean, ready for the HEDIS rule engine.
+                </div>
               </div>
               <div className="p-5 space-y-4 overflow-auto max-h-[560px]">
                 <div>
