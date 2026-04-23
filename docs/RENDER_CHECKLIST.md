@@ -25,15 +25,21 @@ Open: **Render dashboard → agenticdm → Settings**
 Replace the Start Command with:
 
 ```
-uvicorn main:app --host 0.0.0.0 --port $PORT --workers 2 --timeout-keep-alive 75 --proxy-headers --forwarded-allow-ips=* --access-log
+uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1 --timeout-keep-alive 75 --proxy-headers --forwarded-allow-ips=* --access-log
 ```
+
+> ⚠️ **Do NOT raise `--workers` above 1** until `pipeline_state` and
+> `ws_manager` are moved out of process memory (see §7). On 2+ workers
+> `POST /api/pipeline/approve|halt|reset` returns 400 on ~50 % of clicks
+> because the POST round-robins to a worker that doesn't know a run is
+> in progress.
 
 What each flag does and why:
 
 | Flag | Why |
 |------|-----|
-| `--workers 2` | Uses both sides of the 1-CPU Standard. While one worker runs the pipeline the other serves `/status`, `/ws` and `/auth/apps`. **This is the fix for the "UI froze during a run" symptom.** |
-| `--timeout-keep-alive 75` | Keeps TCP connections alive longer than Render's 60s edge idle cap, preventing WebSocket drop-outs. |
+| `--workers 1` | One process, one copy of `pipeline_state`. The "UI doesn't freeze during runs" benefit comes from `asyncio.to_thread(build_mapping_summary, ...)` in `discovery_agent.py`, **not** from multiple workers — the LLM call runs in a worker thread while the event loop keeps serving `/status`, `/ws`, `/auth/apps`. |
+| `--timeout-keep-alive 75` | Keeps TCP connections alive longer than Render's 60 s edge idle cap, preventing WebSocket drop-outs. |
 | `--proxy-headers` | Makes `request.client.host` reflect the real client IP (through Render's edge). |
 | `--forwarded-allow-ips=*` | Trusts the Render edge. |
 | `--access-log` | Adds one-line access logs per request for incident triage. |
@@ -52,7 +58,7 @@ What each flag does and why:
 | `LACARE_LLM_MODEL` | Override LLM | `claude-haiku-4-5-20251001` |
 | `PYTHONUNBUFFERED` | Unbuffered logs | `1` |
 | `PYTHONDONTWRITEBYTECODE` | No `.pyc` churn | `1` |
-| `WEB_CONCURRENCY` | Hint for workers | `2` |
+| `WEB_CONCURRENCY` | Hint for workers | `1` (must match `--workers`) |
 
 ---
 
@@ -151,7 +157,8 @@ for the current demo phase:
 
 | Item | When to add |
 |------|-------------|
-| Redis for WebSocket pub/sub | When you need > 1 instance (horizontal scale) |
+| Move `pipeline_state` + `ws_manager` to Postgres/Redis | **Required before `--workers` > 1.** Currently `pipeline_state` is a module-level Python singleton. Approve/halt/reset endpoints compare `current_stage` against an in-memory value, so they 400 when the POST hits the wrong worker. Fix: persist the stage in a row of `migration_runs` and read it on every request. |
+| Redis for WebSocket pub/sub | Same trigger — when you need > 1 instance. WS clients connect to one worker; fan-out requires a shared broker. |
 | Read replica Postgres | When dashboard queries > 50 ms p95 |
 | Sentry or Datadog | Before onboarding the first paying customer |
 | Prometheus / OpenTelemetry | When you want multi-service traces |

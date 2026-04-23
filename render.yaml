@@ -29,9 +29,15 @@ services:
     buildCommand: pip install -r requirements.txt
 
     # Start command notes:
-    #   --workers 2            : uses both CPU "halves" of the 1-CPU Standard
-    #                            instance. One worker can run the pipeline while
-    #                            the other serves /status, /ws, /auth/apps.
+    #   --workers 1            : REQUIRED. pipeline_state (backend/pipeline_state.py)
+    #                            and ws_manager are in-memory Python singletons.
+    #                            With 2+ workers, each process gets its own copy
+    #                            and /api/pipeline/approve, /halt, /reset etc.
+    #                            return 400 randomly because the POST lands on
+    #                            a worker that doesn't know a run is in progress.
+    #                            Safe to raise to 2+ ONLY after migrating that
+    #                            state to Postgres or Redis (see RENDER_CHECKLIST
+    #                            §7 "What we are NOT doing yet").
     #   --timeout-keep-alive   : keep the connection alive longer so WS and
     #                            long-poll clients don't drop through Render's
     #                            60s idle timeout.
@@ -43,7 +49,7 @@ services:
       uvicorn main:app
       --host 0.0.0.0
       --port $PORT
-      --workers 2
+      --workers 1
       --timeout-keep-alive 75
       --proxy-headers
       --forwarded-allow-ips="*"
@@ -63,7 +69,7 @@ services:
       - key: PYTHONHASHSEED
         value: "0"                 # predictable session-token ordering
       - key: WEB_CONCURRENCY
-        value: "2"                 # some tools (gunicorn fallback) read this
+        value: "1"                 # must match --workers (see start command comment)
 
       # LLM — keep these in Render dashboard, do NOT commit to git
       - key: ANTHROPIC_API_KEY
