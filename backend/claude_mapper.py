@@ -300,7 +300,7 @@ def normalize_ai_mapping_to_engine_format(
     """
     resource_type = ai_result["resource_type"]
     resource_confidence = ai_result.get("resource_confidence", 0.9)
-    resource_reasoning = [ai_result.get("resource_reasoning", "Inferred by Claude AI")]
+    resource_reasoning = [ai_result.get("resource_reasoning", "Inferred by AI mapper")]
 
     fields = []
     requires_review = []
@@ -340,7 +340,7 @@ def normalize_ai_mapping_to_engine_format(
         "resource_candidates": {},
         "fields": fields,
         "row_count": row_count,
-        "mapped_by": "claude_ai",  # provenance flag
+        "mapped_by": "ai_mapper",  # provenance flag
     }
 
     return {

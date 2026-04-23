@@ -18,13 +18,73 @@ from agents.orchestration_agent import run_pipeline
 from agents.monitor_agent import start_monitor
 from fhir_store import ensure_tables, clear_resources, list_run_summaries, get_run_summary, list_records, retry_failed_records
 from run_store import create_run as _create_run, is_pipeline_running, clear_stale_runs, force_fail_all_running
+from lacare.routes import router as lacare_router
+from platform_auth import router as auth_router
+from platform_db import ensure_platform_tables, seed_default_admin, log_activity
 
 settings = get_settings()
-app = FastAPI(title="Brightcone Migration Platform", version="3.0.0")
+app = FastAPI(title="Brightcone Platform", version="4.2.0")
 _pipeline_lock = asyncio.Lock()
 
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True,
                    allow_methods=["*"], allow_headers=["*"])
+
+# --- Activity/access log middleware -----------------------------------------
+# Every /api/lacare/* and /api/auth/* call gets tailed into lacare_activity so
+# the UI's "System Activity" drawer can show the live HTTP traffic the client
+# is driving. This mirrors uvicorn's INFO log shape but persists across
+# restarts and is scoped per-tenant.
+import time as _time
+_ACTIVITY_PATH_PREFIXES = ("/api/lacare/", "/api/auth/")
+# Polling endpoints that the UI hits every ~1.2s — skipping GETs on these
+# keeps the activity tail focused on real events (mutations + drill-downs).
+_ACTIVITY_SKIP_GET = (
+    "/api/lacare/status",
+    "/api/lacare/dashboard",
+    "/api/lacare/runs",
+    "/api/lacare/activity",
+    "/api/lacare/documents",
+    "/api/lacare/evidence",
+)
+
+@app.middleware("http")
+async def _activity_log_middleware(request: Request, call_next):
+    start = _time.perf_counter()
+    response = await call_next(request)
+    try:
+        path = request.url.path
+        is_tracked = any(path.startswith(p) for p in _ACTIVITY_PATH_PREFIXES)
+        is_polling_get = (request.method == "GET"
+                          and any(path == p or path.startswith(p + "?") or path == p + "/"
+                                  for p in _ACTIVITY_SKIP_GET))
+        if is_tracked and not is_polling_get:
+            dur_ms = int((_time.perf_counter() - start) * 1000)
+            # Extract actor from the Bearer token when present (best-effort)
+            actor = ""
+            auth = request.headers.get("authorization") or ""
+            if auth.lower().startswith("bearer "):
+                from platform_db import lookup_session
+                try:
+                    sess = lookup_session(auth.split(" ", 1)[1])
+                    if sess:
+                        actor = sess.get("username") or ""
+                except Exception:
+                    pass
+            log_activity(
+                kind="http",
+                method=request.method,
+                path=path,
+                status=response.status_code,
+                duration_ms=dur_ms,
+                actor=actor,
+            )
+    except Exception:
+        pass
+    return response
+
+
+app.include_router(lacare_router)
+app.include_router(auth_router)
 
 
 def _jsonable(obj):
@@ -572,6 +632,19 @@ async def get_run_data_view(run_id: str, table: str = "", limit: int = 20):
 @app.on_event("startup")
 async def startup():
     ensure_tables()
+    ensure_platform_tables()
+    try:
+        seed_default_admin()
+    except Exception as exc:
+        print(f"[startup] seed_default_admin skipped: {exc}")
+    # Auto-populate the curated CCDA sample library on first boot so the
+    # Sample Library tab always has data to pick from — no manual seeding.
+    try:
+        from lacare.seed_library import seed_library
+        result = seed_library(target_count=30)
+        print(f"[startup] lacare sample library: {result}")
+    except Exception as exc:
+        print(f"[startup] lacare seed_library skipped: {exc}")
     # Single-instance service: any 'running%' row at startup is from a dead
     # process. Force-fail all of them so new pipeline starts are never
     # blocked after a Render restart / deploy / crash.

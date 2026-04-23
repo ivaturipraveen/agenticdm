@@ -1,97 +1,139 @@
-# Agentic Healthcare Data Migration Platform
+# Brightcone Platform
 
-An AI-powered agentic platform that automates end-to-end healthcare data migration and system integration workflows, maintaining HIPAA-grade auditability and human-in-the-loop controls.
+A unified healthcare data platform combining two agentic workspaces:
 
-## Overview
+| Workspace | Purpose |
+|-----------|---------|
+| **Agentic Data Migration** | AI agents that discover, transform, validate and load legacy healthcare data to FHIR R4 |
+| **LA Care — CCDA Intelligence** | Ingests C-CDA XML, runs Claude NLP over narrative text, and recovers HEDIS quality-measure evidence that claims miss |
 
-Migrates synthetic healthcare data from a **PostgreSQL source** (members, eligibility, claims tables) to a **FHIR R4 target** using 5 autonomous agents.
+Both workspaces share a common login, a common Postgres database on Render,
+and a common Claude API key.
 
-## Architecture
+## Repository layout
 
 ```
-PostgreSQL (Source) → Discovery Agent → Transformation Agent → Orchestration Agent → FHIR Endpoint
-                                                                          ↑
-                            QA / Reconciliation Agent ←─────────────────┘
-                            Integration Monitor Agent (runs throughout)
+backend/
+  .env                  # shared config (DB URLs, Claude key, FHIR URL)
+  main.py               # FastAPI entry point — mounts both workspaces
+  requirements.txt
+  platform_db.py        # shared DB + pool + user/session tables
+  platform_auth.py      # signup / login / session auth (DB-backed)
+  agents/               # Agentic DM agent definitions
+  audit_log.py          # Agentic DM compliance
+  claude_mapper.py
+  compliance.py
+  dynamic_fhir_engine.py
+  fhir_client.py
+  fhir_store.py         # Agentic DM FHIR resource store
+  pipeline_state.py
+  run_store.py
+  websocket_manager.py
+  lacare/
+    routes.py           # /api/lacare/* endpoints
+    pipeline.py         # 6-agent CCDA pipeline (ingest → HEDIS rollup)
+    ccda_parser.py
+    hedis_engine.py
+    nlp_extractor.py    # Claude Sonnet + heuristic fallback
+    sample_data.py      # synthetic CCDA generator (for demo seeding)
+    repository.py       # DB CRUD for runs, docs, hits, logs
+
+frontend/src/
+  App.tsx               # shell router: Login → AppSelector → workspace
+  main.tsx
+  index.css
+  shell/                # login + signup + app selector + auth client
+  agenticdm/            # all Agentic DM UI (moved from /agentic)
+    AgenticApp.tsx
+    components/, hooks/, store/, api/, types/
+  lacare/               # LA Care UI
+    LaCareApp.tsx, api.ts, tabs/...
 ```
 
-### 5 Core Agents
+## Database
 
-| Agent | Role |
-|-------|------|
-| **Discovery Agent** | Scans source tables, infers FHIR resource types, generates field mapping with confidence scores |
-| **Transformation Agent** | Converts rows to FHIR R4 resources — normalizes ICD-10, UUIDs, dates, handles nulls |
-| **Orchestration Agent** | Sequences pipeline stages, enforces validation, manages approval gate, batch loads |
-| **QA / Reconciliation Agent** | Post-load verification — row counts, checksums, business rule compliance |
-| **Integration Monitor Agent** | Watches for schema drift throughout execution |
+Everything is persisted to the Render Postgres instance configured in
+`backend/.env`. Tables live in two groups:
 
-## Stack
+**Shared platform tables** (created on startup):
+- `platform_users` — signup accounts with PBKDF2-hashed passwords
+- `platform_sessions` — bearer-token sessions
 
-| Layer | Technology |
-|-------|-----------|
-| Source DB | PostgreSQL (remote via Render) |
-| Backend | FastAPI (Python 3.12) |
-| Frontend | React + Vite + TypeScript + Tailwind CSS |
-| FHIR Target | Configurable HAPI FHIR endpoint |
-| Compliance | HIPAA, FHIR R4, CMS, HL7 validation |
+**LA Care tables**:
+- `lacare_runs` — one row per pipeline run
+- `lacare_documents` — every CCDA document (raw XML + parsed JSON)
+- `lacare_hits` — HEDIS evidence findings
+- `lacare_agent_events` — live agent progress
+- `lacare_logs` — pipeline log stream
 
-## Features
+**Agentic DM tables** (unchanged): `migration_runs`, `run_logs`,
+`run_agent_outputs`, `fhir_loaded_resources`, `fhir_endpoint_calls`.
 
-- Dynamic schema-to-FHIR mapping (no hardcoded field assumptions)
-- Real-time WebSocket pipeline visualization
-- Human approval gate before FHIR load
-- Per-record source → mapped JSON → FHIR R4 traceability
-- Field-level PASS/FAIL validation
-- Retry failed records
-- Run history with per-agent step walkthrough
-- FHIR Endpoint Registry with drill-down
-- Schema drift detection and simulation
-- Exportable compliance audit PDF
-
-## Setup
-
-### Backend
+## Quick start
 
 ```bash
+# 1. Backend
 cd backend
 pip install -r requirements.txt
-cp .env.example .env   # fill in DATABASE_URL, FHIR_BASE_URL
 uvicorn main:app --host 0.0.0.0 --port 8000
-```
 
-### Frontend
-
-```bash
-cd frontend
+# 2. Frontend
+cd ../frontend
 npm install
-npm run dev          # development
-npm run build        # production build
-npm run preview      # serve production build
+npm run dev
 ```
 
-### Environment Variables
+On first boot the platform seeds a default admin:
 
-```env
-DATABASE_URL=postgresql+asyncpg://user:pass@host/db
-SYNC_DATABASE_URL=postgresql://user:pass@host/db
-FHIR_BASE_URL=http://localhost:8080/fhir
-RUN_HOST=0.0.0.0
-RUN_PORT=8000
+```
+username: admin
+password: brightcone2026  (or $PLATFORM_ADMIN_PASSWORD if set)
 ```
 
-## Demo Datasets
+Sign up from the login screen to create additional accounts.
 
-Pre-loaded synthetic datasets (no PHI):
+## LA Care demo flow
 
-| Dataset | Records | Description |
-|---------|---------|-------------|
-| synthea_standard | 650 | Balanced baseline |
-| clean_cohort | 500 | Minimal issues |
-| high_anomaly | 405 | Stress test with errors |
-| edge_cases | 319 | Boundary conditions |
-| medicare_sample | 640 | Production-style |
-| medicaid_complex | 457 | Complex Medicaid |
+1. Log in → pick **LA Care — CCDA Intelligence**.
+2. **Seed demo batch** (100 synthetic C-CDAs) *or* upload your own `.xml`
+   CCDA files on the *Documents* tab.
+3. Click **Run Pipeline** — six agents stream live progress:
+   `ingest → extraction → normalization → NLP → HEDIS → dashboard`.
+4. Explore evidence by measure (FUM, FUA, CBP, HBD, MRP) on the
+   *HEDIS Evidence* tab; drill into any patient / document.
+5. *Before / After* shows the raw C-CDA XML vs. structured clinical data.
+
+All data is stored in the database, so the dashboard survives page reloads
+and multiple users see the same results.
 
 ## License
 
-MIT
+
+cd /Users/yanthraa/Desktop/OpenClaw/Agenticdm/agenticdm
+
+rm -rf .venv
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+pip install -r backend/requirements.txt
+
+
+
+
+
+cd /Users/yanthraa/Desktop/OpenClaw/Agenticdm/agenticdm
+source .venv/bin/activate
+uvicorn main:app --reload --host 0.0.0.0 --port 8000 --app-dir backend
+
+cd /Users/yanthraa/Desktop/OpenClaw/Agenticdm/agenticdm
+uvicorn main:app --reload --host 0.0.0.0 --port 8000 --app-dir backend
+
+
+cd /Users/yanthraa/Desktop/OpenClaw/Agenticdm/agenticdm/frontend
+npm install
+npm run dev
+
+
+
+username: admin
+password: brightcone2026

@@ -558,7 +558,7 @@ def _structural_fallback_map(
     else:
         resource_type = "Patient"
         resource_confidence = 0.50
-        resource_reasoning = ["Default inference — set ANTHROPIC_API_KEY for accurate mapping"]
+        resource_reasoning = ["Default inference — configure the narrative-LLM API key for accurate mapping"]
 
     # Map columns to FHIR paths by value shape
     SHAPE_TO_FHIR: Dict[str, Dict[str, str]] = {

@@ -1,11 +1,7 @@
 import axios from 'axios'
+import { API_BASE, apiUrl } from '../../config'
 
-export const API_BASE = import.meta.env.VITE_API_URL ?? ''
-
-/** Build a full URL for fetch() calls: apiUrl('/api/datasets') */
-export function apiUrl(path: string): string {
-  return `${API_BASE}${path}`
-}
+export { API_BASE, apiUrl }
 
 const client = axios.create({
  baseURL: `${API_BASE}/api`,

@@ -104,11 +104,11 @@ async def run_discovery() -> Dict[str, Any]:
 
         api_key = getattr(settings, 'anthropic_api_key', '')
         use_ai = bool(api_key and api_key.strip() and api_key != "your-anthropic-api-key-here")
-        mapper_label = "Claude AI" if use_ai else "fuzzy keyword fallback"
+        mapper_label = "AI mapper" if use_ai else "fuzzy keyword fallback"
         await ws_manager.send_reasoning(
             "discovery", f"Building FHIR mapping using: {mapper_label}",
-            "Claude Haiku selected for intelligent column inference" if use_ai
-            else "No ANTHROPIC_API_KEY set — using keyword alias + string similarity scoring",
+            "LLM-based mapper selected for intelligent column inference" if use_ai
+            else "No LLM key set — using keyword alias + string similarity scoring",
             "", run_id=run_id
         )
         mapping_bundle = build_mapping_summary(schema_info, anthropic_api_key=api_key)
