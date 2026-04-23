@@ -167,6 +167,24 @@ def _tables_with_dataset_id(cur, tables: list) -> list:
 
 
 # --------------------------------------------------------------------------- #
+# Root banner — Render's internal prober hits `/` every minute and a bare
+# FastAPI app returns 404, which looks alarming in logs. Return a minimal
+# 200 JSON instead so the log stream stays clean and anyone browsing the
+# URL gets a one-line confirmation the API is up.
+# --------------------------------------------------------------------------- #
+
+
+@app.get("/")
+async def root():
+    return JSONResponse({
+        "service": "Brightcone Platform API",
+        "version": app.version,
+        "docs": "/docs",
+        "health": "/api/healthz",
+    })
+
+
+# --------------------------------------------------------------------------- #
 # Health + liveness probes
 #
 # /api/healthz is the endpoint Render hits every few seconds to decide
