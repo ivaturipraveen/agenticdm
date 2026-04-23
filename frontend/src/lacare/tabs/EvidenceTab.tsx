@@ -1,5 +1,7 @@
 import { useMemo, useState } from 'react'
 import { LaCareDashboard, LaCareHit } from '../api'
+import { MEASURE_GLOSSARY } from '../glossary'
+import { Acronym } from '../HelpTip'
 
 interface Props {
   evidence: LaCareHit[]
@@ -39,8 +41,16 @@ export default function EvidenceTab({ evidence, dashboard }: Props) {
     <div className="flex h-full">
       <div className="flex-1 flex flex-col overflow-hidden">
         <div className="px-8 pt-8 pb-4">
-          <h1 className="text-2xl font-semibold text-slate-900">HEDIS Evidence Findings</h1>
-          <p className="text-sm text-slate-500 mt-1">Each row is a quality measure hit sourced from a CDA document. Click a row to inspect the evidence.</p>
+          <h1 className="text-2xl font-semibold text-slate-900">
+            <Acronym>HEDIS</Acronym> Evidence Findings
+          </h1>
+          <p className="text-sm text-slate-500 mt-1 max-w-3xl">
+            Each row is a <strong>gap-closure</strong>: a HEDIS quality measure that was NOT closed by
+            claims but was satisfied by evidence the pipeline found inside a <Acronym>C-CDA</Acronym> document.
+            Click any row to see the full evidence chain. <span className="text-slate-400">
+              Member ID = the patient. Document ID = the specific CCDA that closed the gap for that patient.
+            </span>
+          </p>
         </div>
 
         <div className="px-8 pb-4 flex flex-wrap items-center gap-3">
@@ -143,20 +153,46 @@ export default function EvidenceTab({ evidence, dashboard }: Props) {
           </div>
 
           <div className="p-6 space-y-5 text-sm">
-            <Section label="Member">
+            {/* Plain-English explanation of what this HEDIS measure actually tracks */}
+            {MEASURE_GLOSSARY[selected.measure] && (
+              <Section label={`About ${selected.measure}`}>
+                <p className="text-slate-700 leading-relaxed text-xs">
+                  {MEASURE_GLOSSARY[selected.measure].long}
+                </p>
+                <div className="mt-2 text-[11px] text-slate-600 space-y-1">
+                  <div><span className="text-slate-400 font-semibold">Numerator:</span> {MEASURE_GLOSSARY[selected.measure].numerator}</div>
+                  <div><span className="text-slate-400 font-semibold">Window:</span> {MEASURE_GLOSSARY[selected.measure].window}</div>
+                </div>
+              </Section>
+            )}
+
+            <Section label="Member (patient)">
               <div className="font-semibold text-slate-900">{selected.patient_name}</div>
-              <div className="text-slate-500 font-mono text-xs">{selected.patient_id}</div>
+              <div className="text-slate-500 font-mono text-xs">Member ID: {selected.patient_id}</div>
+              <div className="text-[10px] text-slate-400 mt-0.5">
+                LA Care's enrolled patient. Independent of the document ID below.
+              </div>
             </Section>
 
             <Section label="Summary">
               <p className="text-slate-700 leading-relaxed">{selected.summary}</p>
             </Section>
 
-            <Section label="Evidence Detail">
+            <Section label="Source C-CDA document">
               <div className="space-y-2 text-xs">
                 <Row k="Document Type" v={selected.source_document_type} />
-                <Row k="Document ID" v={<span className="font-mono">{selected.source_document_id}</span>} />
+                <Row k="Document ID" v={<span className="font-mono break-all">{selected.source_document_id}</span>} />
                 <Row k="Section" v={selected.source_section} />
+              </div>
+              <div className="text-[10px] text-slate-400 mt-2">
+                The specific CCDA file (identified by this Document ID) that supplied the
+                evidence. One member can have many documents; this is the one that closed
+                the gap for this measure.
+              </div>
+            </Section>
+
+            <Section label="Evidence Detail">
+              <div className="space-y-2 text-xs">
                 <Row k="Evidence Type" v={selected.evidence_type} />
                 <Row k="Numerator Date" v={selected.numerator_date || '—'} />
                 <Row k="Denominator Date" v={selected.denominator_date || '—'} />

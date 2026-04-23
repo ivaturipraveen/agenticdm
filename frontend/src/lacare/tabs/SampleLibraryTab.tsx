@@ -2,8 +2,10 @@ import { useEffect, useMemo, useState } from 'react'
 import toast from 'react-hot-toast'
 import {
   LaCareSample, LaCareSampleFacet, LaCareSamplePreview,
-  listSamples, getSamplePreview,
+  listSamples, getSamplePreview, getSampleXml,
 } from '../api'
+import { MEASURE_GLOSSARY, DOC_TYPE_GLOSSARY } from '../glossary'
+import { Acronym } from '../HelpTip'
 
 interface Props {
   activeRunInfo: { active: boolean; run_id?: string } | null
@@ -28,17 +30,21 @@ export default function SampleLibraryTab({ activeRunInfo, onRunFromSamples }: Pr
   const [seeded, setSeeded] = useState<number>(0)
   const [loading, setLoading] = useState(true)
   const [scenario, setScenario] = useState('')
+  const [documentType, setDocumentType] = useState('')
   const [search, setSearch] = useState('')
   const [picked, setPicked] = useState<Set<string>>(new Set())
   const [useAi, setUseAi] = useState(true)
   const [focusedId, setFocusedId] = useState<string | null>(null)
   const [preview, setPreview] = useState<LaCareSamplePreview | null>(null)
   const [previewLoading, setPreviewLoading] = useState(false)
+  const [previewView, setPreviewView] = useState<'structured' | 'xml' | 'guide'>('structured')
+  const [xml, setXml] = useState<string>('')
+  const [xmlLoading, setXmlLoading] = useState(false)
 
   const load = async () => {
     setLoading(true)
     try {
-      const res = await listSamples({ scenario, search, limit: 500 })
+      const res = await listSamples({ scenario, document_type: documentType, search, limit: 500 })
       setSamples(res.items)
       setFacets(res.facets)
       setSeeded(res.seeded)
@@ -52,7 +58,7 @@ export default function SampleLibraryTab({ activeRunInfo, onRunFromSamples }: Pr
     }
   }
 
-  useEffect(() => { void load() /* eslint-disable-line */ }, [scenario])
+  useEffect(() => { void load() /* eslint-disable-line */ }, [scenario, documentType])
   useEffect(() => {
     const t = setTimeout(() => { void load() }, 220)
     return () => clearTimeout(t)
@@ -60,15 +66,31 @@ export default function SampleLibraryTab({ activeRunInfo, onRunFromSamples }: Pr
   }, [search])
 
   useEffect(() => {
-    if (!focusedId) { setPreview(null); return }
+    if (!focusedId) { setPreview(null); setXml(''); return }
     let ignore = false
     setPreviewLoading(true)
     getSamplePreview(focusedId)
       .then((p) => { if (!ignore) setPreview(p) })
       .catch(() => { if (!ignore) setPreview(null) })
       .finally(() => { if (!ignore) setPreviewLoading(false) })
+    // Reset XML when switching sample; fetch lazily when the XML tab opens.
+    setXml('')
     return () => { ignore = true }
   }, [focusedId])
+
+  useEffect(() => {
+    // Lazy-load raw XML the first time the user flips to the XML tab for the
+    // focused sample. Keeps /samples/preview fast and avoids shipping a 4KB+
+    // XML blob until the user asks for it.
+    if (previewView !== 'xml' || !focusedId || xml) return
+    let ignore = false
+    setXmlLoading(true)
+    getSampleXml(focusedId)
+      .then((x) => { if (!ignore) setXml(x || '') })
+      .catch(() => { if (!ignore) setXml('') })
+      .finally(() => { if (!ignore) setXmlLoading(false) })
+    return () => { ignore = true }
+  }, [previewView, focusedId, xml])
 
   const togglePick = (id: string) => {
     setPicked((prev) => {
@@ -85,9 +107,29 @@ export default function SampleLibraryTab({ activeRunInfo, onRunFromSamples }: Pr
 
   const facetsByScenario = useMemo(() => {
     const m: Record<string, number> = {}
-    facets.forEach((f) => { m[f.scenario] = (m[f.scenario] || 0) + f.count })
+    facets.forEach((f) => {
+      // Respect the active document_type filter when counting scenario chips,
+      // so the badge numbers stay in sync with what's actually listed.
+      if (documentType && f.document_type !== documentType) return
+      m[f.scenario] = (m[f.scenario] || 0) + f.count
+    })
     return m
-  }, [facets])
+  }, [facets, documentType])
+
+  const facetsByDocType = useMemo(() => {
+    const m: Record<string, number> = {}
+    facets.forEach((f) => {
+      // Same bidirectional filter — doc-type counts respect the active scenario.
+      if (scenario && f.scenario !== scenario) return
+      m[f.document_type] = (m[f.document_type] || 0) + f.count
+    })
+    return m
+  }, [facets, scenario])
+
+  const docTypeTotal = useMemo(
+    () => Object.values(facetsByDocType).reduce((a, b) => a + b, 0),
+    [facetsByDocType],
+  )
 
   const scenarioOptions = useMemo(
     () => Array.from(new Set(samples.map((s) => s.scenario))).sort(),
@@ -111,11 +153,13 @@ export default function SampleLibraryTab({ activeRunInfo, onRunFromSamples }: Pr
     <div className="p-8 max-w-[1500px] mx-auto">
       <div className="flex items-start justify-between gap-6 flex-wrap mb-6">
         <div>
-          <h1 className="text-2xl font-semibold text-slate-900">CCDA Sample Library</h1>
+          <h1 className="text-2xl font-semibold text-slate-900">
+            <Acronym>CCDA</Acronym> Sample Library
+          </h1>
           <p className="text-sm text-slate-500 mt-1 max-w-2xl">
-            {seeded} curated HL7 C-CDA documents already in the database. Pick one to
-            preview its parsed contents, then run the agentic pipeline and watch every
-            step unfold.
+            {seeded} curated <Acronym>HL7</Acronym> <Acronym>C-CDA</Acronym> documents already in the
+            database. Pick one to preview its parsed contents, then run the agentic pipeline and
+            watch every step unfold.
           </p>
         </div>
         <div className="flex items-center gap-2 text-xs">
@@ -129,7 +173,10 @@ export default function SampleLibraryTab({ activeRunInfo, onRunFromSamples }: Pr
       </div>
 
       {/* Scenario quick-filter chips */}
-      <div className="flex flex-wrap gap-2 mb-4">
+      <div className="flex items-center flex-wrap gap-2 mb-3">
+        <span className="text-[10px] font-semibold uppercase tracking-widest text-slate-500 mr-1">
+          HEDIS scenario
+        </span>
         <Chip active={scenario === ''} onClick={() => setScenario('')}>
           All <span className="text-slate-400 ml-1">· {seeded}</span>
         </Chip>
@@ -144,6 +191,30 @@ export default function SampleLibraryTab({ activeRunInfo, onRunFromSamples }: Pr
           placeholder="Search patient / summary…"
           className="ml-auto px-3 py-1.5 rounded-md border border-slate-200 text-sm w-64"
         />
+      </div>
+
+      {/* Document-type quick-filter chips */}
+      <div className="flex items-center flex-wrap gap-2 mb-4" title="Filter the library by CCDA document type (Progress Note, Discharge Summary, Continuity of Care, Referral, Consult). Every CCDA declares its type via a LOINC code in the header.">
+        <span className="text-[10px] font-semibold uppercase tracking-widest text-slate-500 mr-1">
+          Document type
+        </span>
+        <Chip active={documentType === ''} onClick={() => setDocumentType('')}>
+          All types <span className="text-slate-400 ml-1">· {docTypeTotal}</span>
+        </Chip>
+        {Object.keys(facetsByDocType).sort().map((dt) => (
+          <Chip key={dt} active={documentType === dt} onClick={() => setDocumentType(dt)} color="bg-slate-500">
+            {dt} <span className="text-slate-400 ml-1">· {facetsByDocType[dt]}</span>
+          </Chip>
+        ))}
+        {(scenario || documentType) && (
+          <button
+            onClick={() => { setScenario(''); setDocumentType('') }}
+            className="ml-auto text-[11px] text-slate-500 hover:text-rose-600 underline underline-offset-2"
+            title="Clear both filters"
+          >
+            Clear filters
+          </button>
+        )}
       </div>
 
       <div className="grid lg:grid-cols-[minmax(0,1fr)_minmax(0,560px)] gap-5">
@@ -218,17 +289,30 @@ export default function SampleLibraryTab({ activeRunInfo, onRunFromSamples }: Pr
 
         {/* RIGHT: preview panel */}
         <aside className="rounded-2xl border border-slate-200 bg-white overflow-hidden self-start sticky top-4">
-          <div className="px-5 py-3 border-b border-slate-100 bg-slate-50 flex items-center justify-between">
-            <div>
-              <div className="text-[10px] font-bold tracking-widest uppercase text-slate-500">Preview</div>
-              <h2 className="text-sm font-semibold text-slate-900">
-                {preview ? preview.patient?.name || preview.sample_id : 'Select a sample'}
-              </h2>
+          <div className="px-5 py-3 border-b border-slate-100 bg-slate-50">
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="text-[10px] font-bold tracking-widest uppercase text-slate-500">Preview</div>
+                <h2 className="text-sm font-semibold text-slate-900">
+                  {preview ? preview.patient?.name || preview.sample_id : 'Select a sample'}
+                </h2>
+              </div>
+              {preview?.expected_measure && (
+                <span
+                  className="px-2 py-0.5 rounded-md text-[10px] font-bold border bg-rose-50 text-rose-700 border-rose-200"
+                  title={MEASURE_GLOSSARY[preview.expected_measure]?.long || ''}
+                >
+                  Expects {preview.expected_measure}
+                </span>
+              )}
             </div>
-            {preview?.expected_measure && (
-              <span className="px-2 py-0.5 rounded-md text-[10px] font-bold border bg-rose-50 text-rose-700 border-rose-200">
-                Expects {preview.expected_measure}
-              </span>
+            {/* Tab strip: Structured preview · Raw XML · What is this? */}
+            {preview && (
+              <div className="mt-3 flex items-center gap-1 text-[11px] font-semibold">
+                <TabBtn active={previewView === 'structured'} onClick={() => setPreviewView('structured')}>Structured preview</TabBtn>
+                <TabBtn active={previewView === 'xml'} onClick={() => setPreviewView('xml')}>Raw C-CDA XML</TabBtn>
+                <TabBtn active={previewView === 'guide'} onClick={() => setPreviewView('guide')}>What does this mean?</TabBtn>
+              </div>
             )}
           </div>
 
@@ -237,6 +321,10 @@ export default function SampleLibraryTab({ activeRunInfo, onRunFromSamples }: Pr
               <div className="p-10 text-center text-slate-400 text-sm">Loading preview…</div>
             ) : !preview ? (
               <div className="p-10 text-center text-slate-400 text-sm">Pick a sample card on the left to see what the pipeline will process.</div>
+            ) : previewView === 'xml' ? (
+              <XmlPreviewPane xml={xml} loading={xmlLoading} />
+            ) : previewView === 'guide' ? (
+              <SampleGuidePane preview={preview} />
             ) : (
               <div className="p-5 space-y-5">
                 {/* Header stats */}
@@ -368,6 +456,92 @@ export default function SampleLibraryTab({ activeRunInfo, onRunFromSamples }: Pr
           Run pipeline →
         </button>
       </div>
+    </div>
+  )
+}
+
+function TabBtn({ active, onClick, children }: { active: boolean; onClick: () => void; children: any }) {
+  return (
+    <button
+      onClick={onClick}
+      className={`px-2.5 py-1 rounded-md border transition-colors ${
+        active
+          ? 'bg-rose-600 text-white border-rose-600'
+          : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
+      }`}
+    >
+      {children}
+    </button>
+  )
+}
+
+function XmlPreviewPane({ xml, loading }: { xml: string; loading: boolean }) {
+  if (loading) return <div className="p-10 text-center text-slate-400 text-sm">Loading raw XML…</div>
+  if (!xml) return <div className="p-10 text-center text-slate-400 text-sm">No raw XML available.</div>
+  return (
+    <div className="p-3">
+      <div className="text-[11px] text-slate-500 mb-2 px-1 leading-relaxed">
+        This is the <strong>real HL7 C-CDA XML</strong> that is sent to the pipeline.
+        Every structured fact you see in the Structured Preview was extracted from this
+        document by the Extraction + NLP agents. ({xml.length.toLocaleString()} characters · HL7 v3)
+      </div>
+      <pre className="rounded-lg bg-slate-950 text-slate-200 p-3 text-[11px] font-mono leading-relaxed overflow-auto max-h-[52vh]">
+{xml}
+      </pre>
+    </div>
+  )
+}
+
+function SampleGuidePane({ preview }: { preview: LaCareSamplePreview }) {
+  const measure = preview.expected_measure ? MEASURE_GLOSSARY[preview.expected_measure] : null
+  const docType = DOC_TYPE_GLOSSARY[preview.document_type] || null
+  return (
+    <div className="p-5 space-y-4 text-[12px] text-slate-700 leading-relaxed">
+      <div>
+        <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1">Document type</div>
+        <div className="font-semibold text-slate-900">{preview.document_type || '—'}</div>
+        {docType && (
+          <div className="mt-1 px-3 py-2 rounded-lg bg-slate-50 border border-slate-100">
+            <div className="text-slate-700">{docType.purpose}</div>
+            <div className="text-[10px] text-slate-500 mt-1 font-mono">
+              LOINC {docType.loinc} · typically contains {docType.typicalSections.join(', ')}
+            </div>
+          </div>
+        )}
+      </div>
+      {measure && (
+        <div>
+          <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1">Target HEDIS measure</div>
+          <div className="font-semibold text-slate-900">{measure.code} — {measure.name}</div>
+          <div className="mt-1 text-slate-700">{measure.long}</div>
+          <div className="mt-2 grid grid-cols-1 gap-1.5">
+            <GuideRow k="Numerator" v={measure.numerator} />
+            <GuideRow k="Denominator" v={measure.denominator} />
+            <GuideRow k="Time window" v={measure.window} />
+            <GuideRow k="Why CCDA" v={measure.whyCcda} />
+          </div>
+        </div>
+      )}
+      <div>
+        <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1">What happens when you click "Run pipeline"</div>
+        <ol className="list-decimal ml-5 space-y-1">
+          <li><strong>Ingest</strong> — the raw XML is validated and queued for this run.</li>
+          <li><strong>Extraction</strong> — the parser turns XML sections (Problems / Meds / Vitals / Results / Encounters) into rows.</li>
+          <li><strong>Normalization</strong> — ICD / SNOMED / LOINC / RxNorm codes are aligned against NCQA value sets.</li>
+          <li><strong>Narrative NLP</strong> — prose blocks are sent to the clinical LLM to pull facts claims cannot see.</li>
+          <li><strong>HEDIS</strong> — rules engine checks every candidate gap-closure.</li>
+          <li><strong>Dashboard</strong> — evidence is aggregated and quality-bonus recovery is estimated.</li>
+        </ol>
+      </div>
+    </div>
+  )
+}
+
+function GuideRow({ k, v }: { k: string; v: string }) {
+  return (
+    <div className="flex items-start gap-3 px-3 py-1.5 rounded-md bg-slate-50 border border-slate-100">
+      <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 w-24 shrink-0 mt-0.5">{k}</span>
+      <span className="text-slate-700 text-[12px]">{v}</span>
     </div>
   )
 }

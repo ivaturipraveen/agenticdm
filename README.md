@@ -125,8 +125,6 @@ cd /Users/yanthraa/Desktop/OpenClaw/Agenticdm/agenticdm
 source .venv/bin/activate
 uvicorn main:app --reload --host 0.0.0.0 --port 8000 --app-dir backend
 
-cd /Users/yanthraa/Desktop/OpenClaw/Agenticdm/agenticdm
-uvicorn main:app --reload --host 0.0.0.0 --port 8000 --app-dir backend
 
 
 cd /Users/yanthraa/Desktop/OpenClaw/Agenticdm/agenticdm/frontend

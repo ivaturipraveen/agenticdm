@@ -3,6 +3,7 @@ import {
   PieChart, Pie, Cell, Legend,
 } from 'recharts'
 import { LaCareDashboard, LaCareStatus } from '../api'
+import { Acronym } from '../HelpTip'
 
 interface Props {
   dashboard: LaCareDashboard | null
@@ -103,13 +104,19 @@ export default function OverviewTab({
         <div className="relative">
           <div className="text-xs font-bold tracking-widest uppercase text-rose-200">LA Care Health Plan</div>
           <h1 className="mt-2 text-3xl md:text-4xl font-semibold leading-tight max-w-3xl">
-            Turn millions of CCD/CDA documents into HEDIS quality evidence
+            Turn millions of <span className="underline decoration-rose-300/60 decoration-2 underline-offset-4">CCD/CDA</span> documents into HEDIS quality evidence
           </h1>
           <p className="mt-4 text-rose-100 text-base max-w-3xl leading-relaxed">
             Ingest C-CDA XML, extract structured clinical data, apply narrative NLP where
             entries are missing, and match the findings against NCQA HEDIS value sets to
             surface the quality evidence that claims data alone cannot see.
           </p>
+          <div className="mt-4 flex flex-wrap gap-x-5 gap-y-1 text-[11px] text-rose-100/90">
+            <span><Acronym>CCDA</Acronym> = the input document standard</span>
+            <span><Acronym>HEDIS</Acronym> = the quality-measure system</span>
+            <span><Acronym>NCQA</Acronym> = the body that defines HEDIS</span>
+            <span><Acronym>NLP</Acronym> on narrative = unlock non-coded facts</span>
+          </div>
           {onGoToLibrary && (
             <div className="mt-6 flex items-center gap-3">
               <button

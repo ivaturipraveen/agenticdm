@@ -70,11 +70,20 @@ def _empty() -> dict[str, Any]:
     }
 
 
+_DEFAULT_LLM_MODEL = "claude-haiku-4-5-20251001"
+
+
 def _llm_extract(text: str, api_key: str) -> dict[str, Any]:
     from anthropic import Anthropic
     client = Anthropic(api_key=api_key)
+    # Allow operators to override the clinical model via env without code changes.
+    # We keep this aligned with the model already used by the Agentic DM mapper,
+    # which the deployed API key is known to have access to.
+    model = (os.environ.get("LACARE_LLM_MODEL")
+             or os.environ.get("CLINICAL_LLM_MODEL")
+             or _DEFAULT_LLM_MODEL)
     message = client.messages.create(
-        model="claude-3-5-sonnet-20240620",
+        model=model,
         max_tokens=1024,
         system=_SYSTEM_PROMPT,
         messages=[{"role": "user", "content": text}],

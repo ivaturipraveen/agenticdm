@@ -14,6 +14,7 @@ import SampleLibraryTab from './tabs/SampleLibraryTab'
 import LaCareHeader from './LaCareHeader'
 import ActivityConsole from './ActivityConsole'
 import PipelineStatusBanner from './PipelineStatusBanner'
+import TutorialModal, { useFirstRunTutorial } from './TutorialModal'
 
 type Tab = 'overview' | 'library' | 'pipeline' | 'evidence' | 'documents' | 'beforeafter'
 
@@ -42,6 +43,7 @@ export default function LaCareApp({ onExitToLauncher, userLabel }: Props) {
   const [activeRun, setActiveRun] = useState<LaCareActiveRun | null>(null)
   const [activityOpen, setActivityOpen] = useState(false)
   const [canceling, setCanceling] = useState(false)
+  const [tutorialOpen, setTutorialOpen] = useFirstRunTutorial()
   const pollRef = useRef<number | null>(null)
 
   const refreshAll = async (rid?: string | null) => {
@@ -191,7 +193,10 @@ export default function LaCareApp({ onExitToLauncher, userLabel }: Props) {
         onExitToLauncher={onExitToLauncher}
         userLabel={userLabel}
         onOpenActivity={() => setActivityOpen(true)}
+        onOpenTutorial={() => setTutorialOpen(true)}
       />
+
+      <TutorialModal open={tutorialOpen} onClose={() => setTutorialOpen(false)} />
 
       <PipelineStatusBanner
         status={status}
@@ -223,19 +228,21 @@ export default function LaCareApp({ onExitToLauncher, userLabel }: Props) {
             </span>
           )}
           {runs.length > 0 && (
-            <select
-              value={runId ?? ''}
-              onChange={(e) => switchRun(e.target.value)}
-              className="px-2 py-1 rounded-md border border-slate-200 bg-white text-slate-700 max-w-[280px]"
-              title="Select a run"
-            >
-              <option value="" disabled>— switch run —</option>
-              {runs.slice(0, 20).map(r => (
-                <option key={r.run_id} value={r.run_id}>
-                  {new Date(r.started_at).toLocaleString()} · {r.total_documents} docs · {r.status}
-                </option>
-              ))}
-            </select>
+            <label className="flex items-center gap-2" title="Every time you click Run pipeline a new Run is created. Use this to switch between past runs and see their documents / evidence.">
+              <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Viewing run</span>
+              <select
+                value={runId ?? ''}
+                onChange={(e) => switchRun(e.target.value)}
+                className="px-2 py-1 rounded-md border border-slate-200 bg-white text-slate-700 max-w-[280px]"
+              >
+                <option value="" disabled>— switch run —</option>
+                {runs.slice(0, 20).map(r => (
+                  <option key={r.run_id} value={r.run_id}>
+                    {new Date(r.started_at).toLocaleString()} · {r.total_documents} docs · {r.status}
+                  </option>
+                ))}
+              </select>
+            </label>
           )}
         </div>
       </nav>

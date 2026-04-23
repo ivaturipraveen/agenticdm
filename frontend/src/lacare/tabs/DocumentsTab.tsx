@@ -1,6 +1,8 @@
 import { useMemo, useState } from 'react'
 import { LaCareDocument, LaCareHit } from '../api'
 import StepTimeline from '../StepTimeline'
+import { DOC_TYPE_GLOSSARY, SCENARIO_LABEL } from '../glossary'
+import { Acronym } from '../HelpTip'
 
 interface Props {
   documents: LaCareDocument[]
@@ -39,12 +41,17 @@ export default function DocumentsTab({ documents, evidence, runId }: Props) {
       <div className="flex-1 flex flex-col overflow-hidden">
         <div className="px-8 pt-8 pb-4">
           <h1 className="text-2xl font-semibold text-slate-900">Processed Documents</h1>
-          <p className="text-sm text-slate-500 mt-1">
-            {documents.length} C-CDA documents processed.{' '}
+          <p className="text-sm text-slate-500 mt-1 max-w-3xl">
+            {documents.length} <Acronym>C-CDA</Acronym> documents processed in this run.{' '}
             <span className="text-rose-700 font-medium">
               Click any row → right panel shows the full agent trail: raw XML in, structured data out,
-              and the exact text sent to the clinical LLM at every step.
+              and the exact text sent to the clinical <Acronym>LLM</Acronym> at every step.
             </span>
+          </p>
+          <p className="text-[11px] text-slate-400 mt-1">
+            <strong>Type</strong> = the kind of clinical document (LOINC-coded).{' '}
+            <strong>Scenario</strong> = the HEDIS gap the document was synthesised to demonstrate.{' '}
+            <strong>Member ID</strong> (LAC#######) identifies the patient; <strong>Document ID</strong> identifies the CCDA file.
           </p>
         </div>
 
@@ -128,7 +135,20 @@ export default function DocumentsTab({ documents, evidence, runId }: Props) {
             <div>
               <div className="text-[10px] font-bold tracking-widest uppercase text-rose-600">{selected.document_type}</div>
               <h3 className="text-lg font-semibold text-slate-900 mt-1">{selected.patient_name}</h3>
-              <div className="text-xs text-slate-500 font-mono mt-0.5">{selected.patient_id}</div>
+              <div className="text-xs text-slate-500 font-mono mt-0.5">Member ID: {selected.patient_id}</div>
+              {DOC_TYPE_GLOSSARY[selected.document_type] && (
+                <div className="mt-2 px-2.5 py-1.5 rounded-md bg-slate-50 border border-slate-100 text-[11px] text-slate-600 leading-snug max-w-md">
+                  {DOC_TYPE_GLOSSARY[selected.document_type].purpose}
+                  <span className="text-slate-400 font-mono block mt-0.5">
+                    LOINC {DOC_TYPE_GLOSSARY[selected.document_type].loinc}
+                  </span>
+                </div>
+              )}
+              {selected.scenario && SCENARIO_LABEL[selected.scenario] && (
+                <div className="mt-2 text-[11px] text-slate-500">
+                  <span className="font-semibold text-slate-600">Scenario:</span> {SCENARIO_LABEL[selected.scenario]}
+                </div>
+              )}
             </div>
             <button onClick={() => setSelected(null)} className="text-slate-400 hover:text-slate-700 text-xl leading-none">×</button>
           </div>

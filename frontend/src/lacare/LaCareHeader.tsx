@@ -5,9 +5,10 @@ interface Props {
   onExitToLauncher?: () => void
   userLabel?: string
   onOpenActivity?: () => void
+  onOpenTutorial?: () => void
 }
 
-export default function LaCareHeader({ status, onExitToLauncher, userLabel, onOpenActivity }: Props) {
+export default function LaCareHeader({ status, onExitToLauncher, userLabel, onOpenActivity, onOpenTutorial }: Props) {
   const state = status?.status ?? 'idle'
   const indicatorColor =
     state === 'running' ? 'bg-rose-500' :
@@ -65,6 +66,16 @@ export default function LaCareHeader({ status, onExitToLauncher, userLabel, onOp
       </div>
 
       <div className="flex items-center gap-3 text-xs">
+        {onOpenTutorial && (
+          <button
+            onClick={onOpenTutorial}
+            className="px-3 py-1.5 rounded-lg border border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100 font-semibold flex items-center gap-1.5"
+            title="5-page product tour — how the pipeline works, what HEDIS measures we track, and how to run a demo"
+          >
+            <span className="h-4 w-4 rounded-full bg-rose-600 text-white text-[10px] font-bold flex items-center justify-center">?</span>
+            Tutorial
+          </button>
+        )}
         {onOpenActivity && (
           <button
             onClick={onOpenActivity}
