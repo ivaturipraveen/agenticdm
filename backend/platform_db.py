@@ -24,6 +24,7 @@ from typing import Any
 
 import contextlib
 import threading
+import time
 
 import psycopg2
 import psycopg2.extras
@@ -38,6 +39,19 @@ _SESSION_TTL_HOURS = 24 * 7
 _POOL_LOCK = threading.Lock()
 _POOL: ThreadedConnectionPool | None = None
 
+# Pool sizing rationale for the single Uvicorn worker (see RENDER_CHECKLIST).
+#   minconn = 2   — keep a warm connection for healthz + one foreground request
+#   maxconn = 20  — headroom for bursts (LA Care dashboard fires 6 parallel
+#                   requests per refresh × concurrent users + pipeline DB work)
+# TCP connect timeout keeps the app from wedging when Render Postgres is
+# reaching quota or flapping: psycopg2 respects PGCONNECT_TIMEOUT, and we
+# enforce a 5-second ceiling on the initial socket handshake. Tune up
+# carefully — Render Postgres Starter plan caps at ~97 total connections.
+_POOL_MIN_CONN = 2
+_POOL_MAX_CONN = 20
+_POOL_CONNECT_TIMEOUT_SECONDS = 5
+_POOL_ACQUIRE_TIMEOUT_SECONDS = 5.0
+
 
 def _get_pool() -> ThreadedConnectionPool:
     global _POOL
@@ -45,8 +59,9 @@ def _get_pool() -> ThreadedConnectionPool:
         with _POOL_LOCK:
             if _POOL is None:
                 _POOL = ThreadedConnectionPool(
-                    minconn=1, maxconn=10,
+                    minconn=_POOL_MIN_CONN, maxconn=_POOL_MAX_CONN,
                     dsn=get_settings().sync_database_url,
+                    connect_timeout=_POOL_CONNECT_TIMEOUT_SECONDS,
                 )
     return _POOL
 
@@ -109,8 +124,27 @@ class _PooledConn:
 
 def get_conn() -> _PooledConn:
     """Checkout a pooled psycopg2 connection wrapped so `.close()` releases
-    it back to the pool."""
-    return _PooledConn(_get_pool().getconn())
+    it back to the pool.
+
+    Bounded wait: if the pool is saturated we spin up to
+    `_POOL_ACQUIRE_TIMEOUT_SECONDS`, then raise. This prevents the event
+    loop from hanging forever under burst load — the caller gets a fast
+    5xx and Render's health check stays green.
+    """
+    pool = _get_pool()
+    deadline = time.monotonic() + _POOL_ACQUIRE_TIMEOUT_SECONDS
+    last_err: Exception | None = None
+    while time.monotonic() < deadline:
+        try:
+            raw = pool.getconn()
+            return _PooledConn(raw)
+        except Exception as exc:  # psycopg2.pool.PoolError on exhaustion
+            last_err = exc
+            time.sleep(0.05)
+    raise RuntimeError(
+        f"Postgres pool exhausted (>{_POOL_ACQUIRE_TIMEOUT_SECONDS}s wait); "
+        f"last error: {last_err}"
+    )
 
 
 def _conn():  # backwards-compat alias used inside this module

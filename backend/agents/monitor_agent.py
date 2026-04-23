@@ -18,18 +18,31 @@ SYSTEM_TABLES = frozenset({
     "migration_runs", "run_logs", "run_agent_outputs",
     "fhir_loaded_resources",
 })
+# Tables owned by other modules that share this Postgres (LA Care, platform
+# auth). Schema drift on those is irrelevant to Agentic DM's pipeline.
+FOREIGN_TABLE_PREFIXES: tuple = ("lacare_", "platform_")
 KNOWN_COLUMNS = {"dataset_id", "created_at"}
 
 
+def _is_source_table(name: str) -> bool:
+    if name in SYSTEM_TABLES:
+        return False
+    return not any(name.startswith(p) for p in FOREIGN_TABLE_PREFIXES)
+
+
 def _get_source_tables(conn) -> List[str]:
-    """Dynamically discover all public source tables, excluding system tables."""
+    """Dynamically discover Agentic DM source tables only.
+
+    Excludes internal bookkeeping tables and tables owned by other modules
+    (lacare_*, platform_*) that share this Postgres.
+    """
     cur = conn.cursor()
     cur.execute(
         "SELECT table_name FROM information_schema.tables "
         "WHERE table_schema='public' AND table_type='BASE TABLE' "
         "ORDER BY table_name"
     )
-    tables = [r[0] for r in cur.fetchall() if r[0] not in SYSTEM_TABLES]
+    tables = [r[0] for r in cur.fetchall() if _is_source_table(r[0])]
     cur.close()
     return tables
 
@@ -37,7 +50,8 @@ def _get_source_tables(conn) -> List[str]:
 def _get_current_schema() -> Dict[str, Dict[str, str]]:
     snapshot: Dict[str, Dict[str, str]] = {}
     try:
-        conn = psycopg2.connect(settings.sync_database_url)
+        from platform_db import get_conn
+        conn = get_conn()
         tables = _get_source_tables(conn)
         cur = conn.cursor()
         for table in tables:

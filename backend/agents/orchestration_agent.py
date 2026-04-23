@@ -34,7 +34,8 @@ async def _retry(coro_fn, *args, label: str = "op", run_id: str = "", **kwargs):
 
 
 def _fetch_all(table: str, dataset_id: str = "") -> List[Dict[str, Any]]:
-    conn = psycopg2.connect(settings.sync_database_url)
+    from platform_db import get_conn
+    conn = get_conn()
     cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
     cur.execute(
         "SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name=%s AND column_name='dataset_id'",

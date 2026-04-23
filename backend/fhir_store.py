@@ -11,7 +11,11 @@ settings = get_settings()
 
 
 def _conn():
-    return psycopg2.connect(settings.sync_database_url)
+    """Return a pooled psycopg2 connection. Callers must `.close()` to
+    release back to the pool; .close() is intercepted by the pool
+    wrapper so the socket stays open."""
+    from platform_db import get_conn
+    return get_conn()
 
 
 def ensure_tables() -> None:

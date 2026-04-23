@@ -32,13 +32,22 @@ async def run_discovery() -> Dict[str, Any]:
     await ws_manager.send_audit_entry(log_entry_sync("discovery", "Connecting to PostgreSQL source database", "pending", run_id=run_id))
 
     try:
-        conn = psycopg2.connect(settings.sync_database_url)
+        from platform_db import get_conn
+        conn = get_conn()
         cur = conn.cursor()
 
+        # Exclude:
+        #   * Agentic DM bookkeeping tables (migration_runs, run_logs, ...)
+        #   * Foreign-module tables owned by LA Care / platform auth.
+        # Keeping the NOT IN (...) clause for the system tables keeps the
+        # discovery SQL self-contained; the foreign-module prefixes are
+        # filtered in Python so the filter list is easy to extend.
         cur.execute(
             "SELECT table_name FROM information_schema.tables "
             "WHERE table_schema='public' AND table_type='BASE TABLE' "
             "AND table_name NOT IN ('migration_runs', 'run_logs', 'run_agent_outputs', 'fhir_loaded_resources') "
+            "AND table_name NOT LIKE 'lacare\\_%' ESCAPE '\\' "
+            "AND table_name NOT LIKE 'platform\\_%' ESCAPE '\\' "
             "ORDER BY table_name"
         )
         tables = [r[0] for r in cur.fetchall()]

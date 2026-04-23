@@ -137,19 +137,47 @@ async def ws_endpoint(websocket: WebSocket):
         await ws_manager.disconnect(websocket)
 
 
+# Tables Agentic DM must NEVER discover / FHIR-map. Two groups:
+#   * Internal Agentic DM bookkeeping tables (migration_runs, run_logs, ...)
+#   * Tables owned by other apps that share the same Postgres:
+#       - lacare_*     — the LA Care CCDA module
+#       - platform_*   — shared auth / tenancy
+#
+# Without this filter, discovery walks every public table in the DB,
+# runs the Claude mapper against each one, and blows up with things
+# like "[claude_mapper] Failed for table 'lacare_hits'". It also made
+# /api/datasets and /api/pipeline/start take 4–14 seconds because
+# every table triggered a COUNT(*) and an information_schema round-trip.
 _SYSTEM_TABLES = frozenset({
     "migration_runs", "run_logs", "run_agent_outputs", "fhir_loaded_resources",
 })
 
+# Prefixes that identify tables owned by OTHER modules sharing this Postgres.
+# Add new module prefixes here as more apps join the shared DB.
+_FOREIGN_TABLE_PREFIXES: tuple[str, ...] = (
+    "lacare_",
+    "platform_",
+)
+
+
+def _is_source_table(name: str) -> bool:
+    """True iff this table is an Agentic DM source table (not system, not foreign)."""
+    if name in _SYSTEM_TABLES:
+        return False
+    for prefix in _FOREIGN_TABLE_PREFIXES:
+        if name.startswith(prefix):
+            return False
+    return True
+
 
 def _get_source_tables(cur) -> list:
-    """Return all public source tables, excluding system/metadata tables."""
+    """Return all public source tables, excluding system + foreign-module tables."""
     cur.execute(
         "SELECT table_name FROM information_schema.tables "
         "WHERE table_schema='public' AND table_type='BASE TABLE' "
         "ORDER BY table_name"
     )
-    return [r[0] for r in cur.fetchall() if r[0] not in _SYSTEM_TABLES]
+    return [r[0] for r in cur.fetchall() if _is_source_table(r[0])]
 
 
 def _tables_with_dataset_id(cur, tables: list) -> list:
@@ -216,6 +244,16 @@ async def healthz():
         db_error = str(exc)[:160]
 
     uptime_seconds = (datetime.datetime.utcnow() - _APP_BOOTED_AT).total_seconds()
+    # Cache introspection — useful for confirming on a redeploy that
+    # the in-process TTL cache is actually populated and warming up
+    # under real traffic. Counts-only, not contents.
+    cache_entries = 0
+    try:
+        from cache import stats as _cache_stats
+        cache_entries = _cache_stats().get("entries", 0)
+    except Exception:
+        pass
+
     return JSONResponse({
         "status": "ok" if db_ok else "degraded",
         "version": app.version,
@@ -223,6 +261,7 @@ async def healthz():
         "db": "up" if db_ok else "down",
         "db_error": db_error,
         "pipeline_active": bool(getattr(pipeline_state, "run_id", "")),
+        "cache_entries": cache_entries,
     }, status_code=200 if db_ok else 503)
 
 
@@ -234,27 +273,32 @@ async def readyz():
     return JSONResponse({"ready": True, "version": app.version})
 
 
-@app.get("/api/datasets")
-async def get_datasets():
-    import psycopg2, psycopg2.extras
-    try:
-        conn = psycopg2.connect(settings.sync_database_url)
-        cur = conn.cursor()
+def _get_datasets_sync() -> list:
+    """Synchronous implementation of /api/datasets.
 
+    Runs in a worker thread via asyncio.to_thread so the event loop stays
+    free to serve /status, /ws, /healthz during the ~30 COUNT(*) queries
+    this can trigger on a fully-seeded Synthea schema.
+
+    Uses the shared `platform_db` pool — fresh psycopg2.connect() on a
+    managed Postgres takes ~200–400 ms for the TCP+TLS handshake; the
+    pool makes this ~0 ms for warm connections.
+    """
+    from platform_db import get_conn
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
         source_tables = _get_source_tables(cur)
         tables_with_ds = _tables_with_dataset_id(cur, source_tables)
 
         if not tables_with_ds:
-            # No dataset_id columns — return a single synthetic entry with total counts
             counts: dict = {}
             for t in source_tables:
                 cur.execute(f'SELECT COUNT(*) FROM "{t}"')
                 row = cur.fetchone()
                 counts[t] = row[0] if row else 0
             total = sum(counts.values())
-            cur.close()
-            conn.close()
-            return JSONResponse([{
+            return [{
                 "id": "default",
                 "name": "Default Dataset",
                 "description": "All source records (no dataset_id partitioning detected).",
@@ -262,9 +306,8 @@ async def get_datasets():
                 "color": "blue",
                 "total": total,
                 **counts,
-            }])
+            }]
 
-        # Collect distinct dataset_ids across all tables that have the column
         union_parts = " UNION ".join(
             f'SELECT DISTINCT dataset_id FROM "{t}" WHERE dataset_id IS NOT NULL'
             for t in tables_with_ds
@@ -289,58 +332,132 @@ async def get_datasets():
                 "total": total,
                 **counts,
             })
-
-        cur.close()
+        return result
+    finally:
         conn.close()
-        return JSONResponse(result)
+
+
+@app.get("/api/datasets")
+async def get_datasets():
+    """Dataset discovery — cached for 30 s.
+
+    Walks `information_schema.tables` and fires N COUNT(*) queries;
+    even at pooled speeds that's ~100 ms of DB work. Caching for 30 s
+    makes polling effectively free (dataset list only changes when the
+    operator re-imports Synthea).
+    """
+    import cache
+    cache_key = "datasets:list"
+    hit, cached_payload = cache.get(cache_key)
+    if hit:
+        return JSONResponse(
+            cached_payload,
+            headers={"Cache-Control": "public, max-age=10"},
+        )
+    try:
+        result = await asyncio.to_thread(_get_datasets_sync)
+        cache.set(cache_key, result, ttl_seconds=30)
+        return JSONResponse(
+            result,
+            headers={"Cache-Control": "public, max-age=10"},
+        )
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
-@app.get("/api/datasets/{dataset_id}/preview")
-async def dataset_preview(dataset_id: str):
-    import psycopg2, psycopg2.extras
+def _dataset_preview_sync(dataset_id: str) -> dict:
+    """Synchronous implementation of /api/datasets/{id}/preview.
+
+    Batches all information_schema.columns lookups into ONE query instead
+    of N (one per table). The old implementation did 3–4 queries per table
+    which, on a 25-table schema, was 100 round-trips to Render Postgres
+    and explained the 14-second responses.
+
+    Uses the shared `platform_db` pool.
+    """
+    import psycopg2.extras
+    from platform_db import get_conn
+    conn = get_conn()
     try:
-        conn = psycopg2.connect(settings.sync_database_url)
         plain_cur = conn.cursor()
         source_tables = _get_source_tables(plain_cur)
         plain_cur.close()
 
-        cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
-        result = {}
-        for table in source_tables:
-            # Check whether this table has a dataset_id column
-            cur.execute(
-                "SELECT 1 FROM information_schema.columns "
-                "WHERE table_schema='public' AND table_name=%s AND column_name='dataset_id'",
-                (table,),
-            )
-            has_ds = bool(cur.fetchone())
+        if not source_tables:
+            return {}
 
-            if has_ds and dataset_id != "default":
+        cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+
+        # ONE query to fetch columns for every source table.
+        cur.execute(
+            "SELECT table_name, column_name, data_type "
+            "FROM information_schema.columns "
+            "WHERE table_schema='public' AND table_name = ANY(%s) "
+            "ORDER BY table_name, ordinal_position",
+            (source_tables,),
+        )
+        columns_by_table: dict[str, list] = {t: [] for t in source_tables}
+        dataset_id_tables: set[str] = set()
+        for row in cur.fetchall():
+            tname = row["table_name"]
+            columns_by_table.setdefault(tname, []).append(
+                {"name": row["column_name"], "type": row["data_type"]}
+            )
+            if row["column_name"] == "dataset_id":
+                dataset_id_tables.add(tname)
+
+        result: dict = {}
+        for table in source_tables:
+            has_ds = table in dataset_id_tables
+            use_filter = has_ds and dataset_id != "default"
+
+            if use_filter:
                 cur.execute(f'SELECT COUNT(*) FROM "{table}" WHERE dataset_id=%s', (dataset_id,))
             else:
                 cur.execute(f'SELECT COUNT(*) FROM "{table}"')
             count_row = cur.fetchone()
             count = count_row[0] if count_row else 0
 
-            if has_ds and dataset_id != "default":
+            if use_filter:
                 cur.execute(f'SELECT * FROM "{table}" WHERE dataset_id=%s LIMIT 8', (dataset_id,))
             else:
                 cur.execute(f'SELECT * FROM "{table}" LIMIT 8')
             rows = _clean_rows([dict(r) for r in cur.fetchall()])
 
-            cur.execute(
-                "SELECT column_name, data_type FROM information_schema.columns "
-                "WHERE table_name=%s AND table_schema='public' ORDER BY ordinal_position",
-                (table,),
-            )
-            cols = [{"name": r[0], "type": r[1]} for r in cur.fetchall()]
-            result[table] = {"count": count, "columns": cols, "sample": rows}
-
-        cur.close()
+            result[table] = {
+                "count": count,
+                "columns": columns_by_table.get(table, []),
+                "sample": rows,
+            }
+        return result
+    finally:
         conn.close()
-        return JSONResponse(result)
+
+
+@app.get("/api/datasets/{dataset_id}/preview")
+async def dataset_preview(dataset_id: str):
+    """Dataset preview — cached per-dataset for 20 s.
+
+    Even at pooled speed this endpoint fetches 8 sample rows × N tables
+    plus a batched column-metadata query — ~200-400 ms of DB work. The
+    preview only changes when the Synthea import runs, so a 20 s cache
+    is a safe, large win for the dashboard that shows this card.
+    """
+    import cache
+    cache_key = f"dataset_preview:{dataset_id}"
+    hit, cached_payload = cache.get(cache_key)
+    if hit:
+        return JSONResponse(
+            cached_payload,
+            headers={"Cache-Control": "public, max-age=10"},
+        )
+    try:
+        result = await asyncio.to_thread(_dataset_preview_sync, dataset_id)
+        cache.set(cache_key, result, ttl_seconds=20)
+        return JSONResponse(
+            result,
+            headers={"Cache-Control": "public, max-age=10"},
+        )
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
@@ -494,14 +611,18 @@ async def get_runs():
 
 @app.delete("/api/runs/{run_id}")
 async def delete_run(run_id: str):
-    import psycopg2
-    conn = psycopg2.connect(settings.sync_database_url)
+    import cache
+    from platform_db import get_conn
+    conn = get_conn()
     cur = conn.cursor()
     cur.execute('DELETE FROM run_logs WHERE run_id=%s', (run_id,))
     cur.execute('DELETE FROM run_agent_outputs WHERE run_id=%s', (run_id,))
     cur.execute('DELETE FROM migration_runs WHERE run_id=%s', (run_id,))
     cur.execute('DELETE FROM fhir_loaded_resources WHERE run_id=%s', (run_id,))
     conn.commit(); cur.close(); conn.close()
+    # Datasets / preview counts just changed.
+    cache.invalidate("datasets")
+    cache.invalidate("dataset_preview")
     from run_store import get_all_runs
     await ws_manager.broadcast("RUNS_UPDATED", {"runs": get_all_runs()})
     return JSONResponse({"status": "deleted"})
@@ -509,8 +630,9 @@ async def delete_run(run_id: str):
 
 @app.delete("/api/runs")
 async def delete_runs():
-    import psycopg2
-    conn = psycopg2.connect(settings.sync_database_url)
+    import cache
+    from platform_db import get_conn
+    conn = get_conn()
     cur = conn.cursor()
     cur.execute('DELETE FROM run_logs')
     cur.execute('DELETE FROM run_agent_outputs')
@@ -518,6 +640,8 @@ async def delete_runs():
     conn.commit()
     cur.close()
     conn.close()
+    cache.invalidate("datasets")
+    cache.invalidate("dataset_preview")
     return JSONResponse({"status": "deleted"})
 
 
@@ -590,13 +714,44 @@ async def delete_fhir_resources():
 
 @app.get('/api/target/health')
 async def target_health():
+    """FHIR endpoint reachability probe — cached for 20 s.
+
+    Without caching, every LA Care dashboard refresh and every Agentic
+    DM MigrationView mount hits the external HAPI server. HAPI adds
+    200–500 ms of latency and rate-limits aggressive callers. The
+    answer only changes when the endpoint itself goes up/down, so a
+    20 s cache is safe and cuts outbound calls by ~95 %.
+    """
     import httpx
+    import cache
+
+    cache_key = f"target_health:{settings.fhir_base_url}"
+    hit, cached_payload = cache.get(cache_key)
+    if hit:
+        return JSONResponse(
+            cached_payload,
+            headers={"Cache-Control": "public, max-age=15"},
+        )
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
             resp = await client.get(settings.fhir_base_url)
-            return JSONResponse({"reachable": True, "status_code": resp.status_code, "target": settings.fhir_base_url})
+            payload = {
+                "reachable": True,
+                "status_code": resp.status_code,
+                "target": settings.fhir_base_url,
+            }
     except Exception as e:
-        return JSONResponse({"reachable": False, "status_code": None, "target": settings.fhir_base_url, "error": str(e)})
+        payload = {
+            "reachable": False,
+            "status_code": None,
+            "target": settings.fhir_base_url,
+            "error": str(e),
+        }
+    cache.set(cache_key, payload, ttl_seconds=20)
+    return JSONResponse(
+        payload,
+        headers={"Cache-Control": "public, max-age=15"},
+    )
 
 
 
@@ -615,10 +770,11 @@ async def get_run_agents(run_id: str):
 
 @app.get("/api/runs/{run_id}/data-view")
 async def get_run_data_view(run_id: str, table: str = "", limit: int = 20):
-    import psycopg2, psycopg2.extras
+    import psycopg2.extras
     from agents.transformation_agent import transform_batch
+    from platform_db import get_conn
     try:
-        conn = psycopg2.connect(settings.sync_database_url)
+        conn = get_conn()
         plain_cur = conn.cursor()
 
         # Resolve the table to inspect

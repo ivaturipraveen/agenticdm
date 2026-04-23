@@ -12,8 +12,15 @@ settings = get_settings()
 
 @contextmanager
 def _get_conn():
-    """Context manager that ensures connection is always closed and transaction committed."""
-    conn = psycopg2.connect(settings.sync_database_url)
+    """Context manager that ensures a pooled connection is always
+    released and the transaction committed.
+
+    Uses the shared `platform_db` pool: fresh psycopg2.connect() on a
+    managed Postgres takes 200–400 ms for the TCP+TLS handshake; the
+    pool reuses warm connections so this becomes ~0 ms.
+    """
+    from platform_db import get_conn as _get_pooled
+    conn = _get_pooled()
     try:
         yield conn
         conn.commit()
@@ -21,7 +28,7 @@ def _get_conn():
         conn.rollback()
         raise
     finally:
-        conn.close()
+        conn.close()  # returns to pool, doesn't actually close the socket
 
 
 def is_pipeline_running() -> bool:

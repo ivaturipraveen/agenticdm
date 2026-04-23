@@ -1,6 +1,7 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import clsx from 'clsx'
 import { usePipelineStore } from '../store/pipelineStore'
+import { apiUrl } from '../api/client'
 import { AgentName, MappingTableSummary, ReviewItem } from '../types/pipeline'
 
 const AGENTS: { id: AgentName; num: number; title: string; subtitle: string; color: string }[] = [
@@ -284,7 +285,22 @@ function OrchestrationView() {
  // Live counts: use approval gate data, or agent records, or schema total while loading
  const liveReadyCount = approvalGate?.records_to_load
  ?? (stage === 'LOAD' || stage === 'RECONCILE' || stage === 'COMPLETE' ? (migrationSummary?.total_loaded ?? agents.orchestration.records_processed ?? schemaMapping?.summary?.total_rows ?? 0) : (schemaMapping?.summary?.total_rows ?? 0))
- const liveFhirUrl = (migrationSummary?.agent_outputs as any)?.fhir_url || 'http://localhost:8080/fhir'
+ // Show the REAL FHIR target the backend is configured to use, not a
+ // hardcoded localhost fallback. After the first pipeline run the URL
+ // comes from the run's agent_outputs; before that, we fetch it live
+ // from /api/target/health so the card never lies about the target.
+ const [configuredFhirUrl, setConfiguredFhirUrl] = useState<string>('')
+ useEffect(() => {
+   let cancelled = false
+   fetch(apiUrl('/api/target/health'))
+     .then(r => r.json())
+     .then(d => { if (!cancelled) setConfiguredFhirUrl(d?.target || '') })
+     .catch(() => { /* leave blank on error — better than a wrong default */ })
+   return () => { cancelled = true }
+ }, [])
+ const liveFhirUrl = (migrationSummary?.agent_outputs as any)?.fhir_url
+   || configuredFhirUrl
+   || 'Not configured'
  const steps = [
  { key: 'EXTRACT', label: 'Extract', desc: 'Collect source rows from the selected dataset.' },
  { key: 'TRANSFORM', label: 'Transform', desc: 'Receive converted FHIR-ready data from Agent 2.' },

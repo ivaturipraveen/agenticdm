@@ -62,7 +62,13 @@ def _scenario_label(scenario: str) -> str:
 
 @router.get("/measures")
 async def list_measures():
-    return JSONResponse(MEASURES)
+    # MEASURES is a module-level constant. Cache for a day and tell the
+    # browser it's safe to reuse for 5 min — eliminates an unnecessary
+    # round-trip on every dashboard refresh.
+    return JSONResponse(
+        MEASURES,
+        headers={"Cache-Control": "public, max-age=300"},
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -73,16 +79,37 @@ async def list_measures():
 async def get_samples(scenario: str = "", document_type: str = "", search: str = "",
                       limit: int = 500, offset: int = 0,
                       authorization: str | None = Header(default=None)):
+    """List samples with 30-second in-process cache.
+
+    The `lacare_samples` table is seeded once at startup and only changes
+    when an operator explicitly re-seeds. The facets aggregate is
+    expensive (full scan + GROUP BY) and fired on every library refresh,
+    so caching it by (scenario, doc_type, search, pagination) tuple
+    saves ~20-40ms per polled refresh.
+    """
     require_session(authorization)
+    from cache import get as cache_get, set as cache_set
+    cache_key = f"lacare_samples:{scenario}:{document_type}:{search}:{limit}:{offset}"
+    hit, cached_payload = cache_get(cache_key)
+    if hit:
+        return JSONResponse(
+            cached_payload,
+            headers={"Cache-Control": "public, max-age=15"},
+        )
     total, items = repo.list_samples(scenario=scenario, document_type=document_type,
                                      search=search, limit=limit, offset=offset)
     facets = repo.sample_scenario_facets()
-    return JSONResponse({
+    payload = {
         "total": total,
         "items": items,
         "facets": facets,
         "seeded": repo.sample_count(),
-    })
+    }
+    cache_set(cache_key, payload, ttl_seconds=30)
+    return JSONResponse(
+        payload,
+        headers={"Cache-Control": "public, max-age=15"},
+    )
 
 
 @router.get("/samples/{sample_id}/xml", response_class=PlainTextResponse)
@@ -220,6 +247,8 @@ async def seed_samples(payload: dict[str, Any] = Body(default_factory=dict),
         )
         inserted += 1
     log_activity("seed", message=f"Sample library seeded — {inserted} CCDAs inserted")
+    from cache import invalidate as _invalidate_cache
+    _invalidate_cache("lacare_samples")
     return JSONResponse({"status": "seeded", "total": repo.sample_count(), "inserted": inserted})
 
 
