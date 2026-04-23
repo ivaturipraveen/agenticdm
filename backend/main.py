@@ -166,6 +166,56 @@ def _tables_with_dataset_id(cur, tables: list) -> list:
     return result
 
 
+# --------------------------------------------------------------------------- #
+# Health + liveness probes
+#
+# /api/healthz is the endpoint Render hits every few seconds to decide
+# whether this process is alive. It MUST be fast (<200 ms), MUST NOT
+# trigger any LLM calls, and MUST NOT hold the DB pool — if Render gets
+# no response it assumes the container is dead and restarts it, which is
+# exactly what caused the cascading failures we saw at 27:30 UTC.
+# --------------------------------------------------------------------------- #
+
+_APP_BOOTED_AT = datetime.datetime.utcnow()
+
+
+@app.get("/api/healthz")
+async def healthz():
+    """Liveness probe for Render. Lightweight DB-pool ping only."""
+    db_ok = False
+    db_error: str | None = None
+    try:
+        # Use a borrowed pool connection and immediately return it — do not
+        # hold it while serving this endpoint.
+        from platform_db import pooled_connection
+        with pooled_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT 1")
+            cur.fetchone()
+            cur.close()
+        db_ok = True
+    except Exception as exc:  # noqa: BLE001 — health check must never raise
+        db_error = str(exc)[:160]
+
+    uptime_seconds = (datetime.datetime.utcnow() - _APP_BOOTED_AT).total_seconds()
+    return JSONResponse({
+        "status": "ok" if db_ok else "degraded",
+        "version": app.version,
+        "uptime_seconds": int(uptime_seconds),
+        "db": "up" if db_ok else "down",
+        "db_error": db_error,
+        "pipeline_active": bool(getattr(pipeline_state, "run_id", "")),
+    }, status_code=200 if db_ok else 503)
+
+
+@app.get("/api/readyz")
+async def readyz():
+    """Readiness probe — same as healthz but without the DB dependency,
+    for use behind a load balancer that wants to pre-warm before sending
+    traffic."""
+    return JSONResponse({"ready": True, "version": app.version})
+
+
 @app.get("/api/datasets")
 async def get_datasets():
     import psycopg2, psycopg2.extras

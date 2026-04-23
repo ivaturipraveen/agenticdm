@@ -1,4 +1,5 @@
 """Agent 1 - Discovery Agent - dynamic schema-driven FHIR mapping"""
+import asyncio
 import psycopg2
 import decimal as _dec
 import datetime as _dt
@@ -111,7 +112,16 @@ async def run_discovery() -> Dict[str, Any]:
             else "No LLM key set — using keyword alias + string similarity scoring",
             "", run_id=run_id
         )
-        mapping_bundle = build_mapping_summary(schema_info, anthropic_api_key=api_key)
+        # build_mapping_summary() internally calls the Anthropic SDK
+        # synchronously (client.messages.create). Running it directly on the
+        # event loop blocks every other request on this worker — which is
+        # what caused the 26 s /api/pipeline/start and the WebSocket
+        # timeouts we saw on Render Starter. Offload to a worker thread so
+        # the event loop stays free to serve /status, /ws and /auth/apps
+        # while the LLM round-trips complete.
+        mapping_bundle = await asyncio.to_thread(
+            build_mapping_summary, schema_info, api_key,
+        )
 
         for item in mapping_bundle["mapping_summary"]:
             auto_count = sum(1 for f in item["fields"] if f["status"] == "auto_mapped")

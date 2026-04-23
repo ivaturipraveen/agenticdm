@@ -1,0 +1,93 @@
+# Render.com infrastructure as code.
+#
+# This file makes the production config reproducible and reviewable. If you
+# change a setting in the Render UI, also update it here so the next deploy
+# doesn't regress. Render reads this automatically when you point a Blueprint
+# at the repo, or you can ignore it and keep editing the UI — the settings
+# below are still the canonical "what prod should look like".
+#
+# Deployment topology (recommended):
+#   * 1  Web service   (agenticdm)   — serves both Agentic DM and LA Care APIs
+#   * 1  Managed DB    (Postgres)    — already provisioned on Render
+#
+# Optional future split (when load grows): break the LA Care routes out into
+# a second Web service that reuses the same Postgres. The code is already
+# modular for this (see lacare/*).
+
+services:
+  # ---------------------------------------------------------------------- #
+  # Main API (FastAPI: Agentic DM + LA Care + platform auth)
+  # ---------------------------------------------------------------------- #
+  - type: web
+    name: agenticdm
+    runtime: python
+    region: oregon
+    plan: standard            # 1 CPU, 2 GB RAM — required; Starter OOMed on Synthea.
+    rootDir: backend
+    branch: main
+    autoDeploy: false         # manual deploy — protects client demos from accidental pushes.
+    buildCommand: pip install -r requirements.txt
+
+    # Start command notes:
+    #   --workers 2            : uses both CPU "halves" of the 1-CPU Standard
+    #                            instance. One worker can run the pipeline while
+    #                            the other serves /status, /ws, /auth/apps.
+    #   --timeout-keep-alive   : keep the connection alive longer so WS and
+    #                            long-poll clients don't drop through Render's
+    #                            60s idle timeout.
+    #   --proxy-headers        : respect Render's X-Forwarded-* headers so logs
+    #                            record real client IPs.
+    #   --forwarded-allow-ips  : trust the Render edge layer as proxy.
+    #   --access-log           : print one-line access logs for correlation.
+    startCommand: >
+      uvicorn main:app
+      --host 0.0.0.0
+      --port $PORT
+      --workers 2
+      --timeout-keep-alive 75
+      --proxy-headers
+      --forwarded-allow-ips="*"
+      --access-log
+
+    # Render probes this every ~5s. MUST be fast and never blocked by the
+    # pipeline. The endpoint in main.py returns in <200ms and touches one
+    # DB row. If it starts returning 503 the process is auto-recycled.
+    healthCheckPath: /api/healthz
+
+    envVars:
+      # Python / server behaviour
+      - key: PYTHONUNBUFFERED
+        value: "1"                 # stream logs immediately, no buffering
+      - key: PYTHONDONTWRITEBYTECODE
+        value: "1"                 # don't churn disk on .pyc files
+      - key: PYTHONHASHSEED
+        value: "0"                 # predictable session-token ordering
+      - key: WEB_CONCURRENCY
+        value: "2"                 # some tools (gunicorn fallback) read this
+
+      # LLM — keep these in Render dashboard, do NOT commit to git
+      - key: ANTHROPIC_API_KEY
+        sync: false                # prompt on every blueprint apply, never stored in git
+      - key: LACARE_LLM_MODEL
+        value: "claude-haiku-4-5-20251001"
+
+      # DB — Render sets DATABASE_URL automatically when linked; we also
+      # expose sync_database_url for legacy callsites.
+      - key: DATABASE_URL
+        sync: false
+      - key: SYNC_DATABASE_URL
+        sync: false
+
+    # Scaling: keep a single instance for now; horizontal scaling requires a
+    # proper WS pub/sub (Redis) because the Agentic DM ws_manager keeps
+    # socket state in-process. Adding that is the next production step.
+    numInstances: 1
+
+# ---------------------------------------------------------------------- #
+# IaC checklist for new developers:
+# 1. Do NOT change `rootDir` — the repo is a monorepo, backend/ is the code.
+# 2. If you need more workers, first verify memory headroom (2 GB split
+#    between 2 workers + psycopg pool + Synthea in-memory = ~1.5 GB peak).
+# 3. Scaling to 2+ instances requires moving ws_manager state out of memory.
+# 4. /api/healthz must stay fast. Never add business logic to it.
+# ---------------------------------------------------------------------- #
